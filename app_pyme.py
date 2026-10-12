@@ -31,6 +31,7 @@ from modulo_pago_manual import pantalla_suscripcion_modulo, es_admin_usuario
 # ──────────────────────────────────────────────────────────────
 MODULO_ID = 'pyme'              # clave en PRODUCTOS de modulo_pago_manual
 REQUIERE_SUSCRIPCION = True     # False = acceso libre mientras lo probás
+MODO_DEMO = True                # True = sin login ni Supabase (solo para probar)
 ZONA_AR = ZoneInfo("America/Argentina/Buenos_Aires")
 
 st.set_page_config(
@@ -130,8 +131,11 @@ def init_supabase():
 def init_supabase_admin():
     return create_client(st.secrets["SUPABASE_URL"], st.secrets["SUPABASE_SERVICE_KEY"])
 
-auth_client = init_supabase()       # login / registro / sesión (anon key)
-supabase = init_supabase_admin()    # resto (service_role)
+if MODO_DEMO:
+    auth_client = supabase = None
+else:
+    auth_client = init_supabase()
+    supabase = init_supabase_admin()
 
 cookies = CookieController()
 
@@ -255,18 +259,19 @@ def pantalla_acceso():
 # ──────────────────────────────────────────────────────────────
 #  FLUJO PRINCIPAL
 # ──────────────────────────────────────────────────────────────
-restaurar_sesion()
-
-if "usuario" not in st.session_state:
-    pantalla_acceso()
-    st.stop()
-
-USUARIO = st.session_state["usuario"]
-USER_ID = USUARIO.id
-EMAIL = USUARIO.email
+if MODO_DEMO:
+    USER_ID, EMAIL = "demo", "demo@capitalmas.com"
+else:
+    restaurar_sesion()
+    if "usuario" not in st.session_state:
+        pantalla_acceso()
+        st.stop()
+    USUARIO = st.session_state["usuario"]
+    USER_ID = USUARIO.id
+    EMAIL = USUARIO.email
 
 # ── Paywall (admin y usuarios con trial/plan activo pasan) ──
-if REQUIERE_SUSCRIPCION:
+if REQUIERE_SUSCRIPCION and not MODO_DEMO:
     if not pantalla_suscripcion_modulo(supabase, USER_ID, EMAIL, MODULO_ID):
         c1, c2, c3 = st.columns([3, 1, 3])
         with c2:
