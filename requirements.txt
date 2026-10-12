@@ -1,5 +1,9 @@
 streamlit
 supabase
 streamlit-cookies-controller
+pandas
+openpyxl
+pdfplumber
 tzdata
-# Agregá acá las librerías que use modulo_pyme.py (por ejemplo: pandas, plotly, openpyxl, pdfplumber)
+# Opcional: solo si querés poder importar archivos Excel viejos (.xls)
+# xlrd
