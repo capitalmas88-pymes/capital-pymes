@@ -1,0 +1,14 @@
+# Claves privadas
+.streamlit/secrets.toml
+.env
+
+# Python
+__pycache__/
+*.pyc
+venv/
+.venv/
+
+# Sistema / editor
+.DS_Store
+.vscode/
+.idea/

@@ -1,0 +1,5 @@
+streamlit
+supabase
+streamlit-cookies-controller
+tzdata
+# Agregá acá las librerías que use modulo_pyme.py (por ejemplo: pandas, plotly, openpyxl, pdfplumber)
