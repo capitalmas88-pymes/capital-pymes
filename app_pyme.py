@@ -19,6 +19,7 @@ from datetime import datetime
 from zoneinfo import ZoneInfo
 
 import streamlit as st
+import altair as alt   # ya viene incluido con Streamlit
 from supabase import create_client
 from streamlit_cookies_controller import CookieController
 
