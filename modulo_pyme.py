@@ -1,30 +1,25 @@
 # ==============================================================
-#  MÓDULO PyMEs — v4 (DASHBOARD ÚNICO, MODO SIMULACIÓN, sin base de datos)
+#  MÓDULO PyMEs — v5 (DASHBOARD ÚNICO, MODO SIMULACIÓN, sin base de datos)
 #
 #  Dashboard con 4 módulos, cada uno accesible con su botón (render_nav_pyme):
 #
 #     KPIs (arriba)  Caja chica · Bancos/Digital · Stock crítico · Resultado neto del mes
-#     A) Registradora exprés   Venta · Compra · Gasto · Cobro · Pago
-#     B) Inventario + Calculadora de costos (escandallo / BOM)
-#     C) Historial de transacciones (anular / editar)
-#     D) Reportes en tiempo real: Estado de Resultados (P&L) + Flujo de Caja
+#     A) Registradora exprés   Venta · Compra · Gasto · Cobro · Pago · Devolución · Inversión/Financ.
+#     B) Inventario + Receta y costo del producto + Calculadora de precios
+#     C) Historial de transacciones (buscar, filtrar, exportar, anular / editar)
+#     D) Estados financieros: Estado de Resultados y Flujo de Caja (Ene–Dic + Total)
 #
-#  Novedades v4:
-#     - Compras con VARIOS productos en una sola operación (detalle tipo ticket)
-#     - Se pueden comprar productos que todavía no existen (se crean al confirmar)
-#     - Nombre del negocio configurable (Configuración) y visible en el encabezado
-#     - Importar compras y gastos desde CSV, Excel o PDF
-#       (requiere en requirements.txt:  openpyxl  y  pdfplumber)
+#  Novedades v5:
+#     - Calculadora de precios (pasarelas, plataformas, impuestos, cuotas)
+#     - Estado de Resultados y Flujo de Caja mensuales, como la planilla
+#     - Devoluciones, descuentos, inversión y financiamiento
+#     - Historial con buscador y filtros; exportar a CSV / Excel / PDF de cierre del día
+#     - Alerta ⚠️ en stock bajo
+#
+#  requirements.txt:  openpyxl  pdfplumber  reportlab
 #
 #  Todo el estado vive en st.session_state (prefijo "pyme_sim_" para los
-#  datos y "pw_" para los widgets). Nada se persiste entre sesiones: es a
-#  propósito, para cerrar primero la parte visual/UX y recién después
-#  conectar la base de datos.
-#
-#  Los nombres de campos de productos / transacciones / insumos ya son los
-#  del esquema SQL (ver comentario al final), así que el día que se conecte
-#  Supabase, solo hay que reemplazar _siguiente_id / _nueva_tx / los
-#  updates en memoria por insert/update contra las tablas.
+#  datos y "pw_" para los widgets). Nada se persiste entre sesiones.
 #
 #  Atajos de teclado: Enter confirma (formularios y buscador),
 #  F2 salta al buscador de productos.
@@ -36,6 +31,7 @@ import re
 from html import escape as _esc
 from datetime import date, datetime, timedelta
 
+import altair as alt
 import pandas as pd
 import streamlit as st
 import streamlit.components.v1 as components
@@ -45,13 +41,32 @@ WIDGET_PREFIX = 'pw_'         # keys de widgets (se limpian al reiniciar)
 NEGOCIO_KEY = 'pyme_negocio_nombre'   # sin prefijo: "Reiniciar datos" no lo borra
 
 TIPOS_MOV = {
-    'SALE':       ('🛒', 'Venta'),
-    'PURCHASE':   ('📥', 'Compra'),
-    'EXPENSE':    ('💸', 'Gasto'),
-    'COLLECTION': ('💰', 'Cobro'),
-    'PAYMENT':    ('🏦', 'Pago'),
+    'SALE':            ('🛒', 'Venta'),
+    'PURCHASE':        ('📥', 'Compra'),
+    'EXPENSE':         ('💸', 'Gasto'),
+    'COLLECTION':      ('💰', 'Cobro'),
+    'PAYMENT':         ('🏦', 'Pago'),
+    'SALE_RETURN':     ('↩️', 'Devolución de venta'),
+    'PURCHASE_RETURN': ('📤', 'Devolución de compra'),
+    'INV_IN':          ('🏗️', 'Entrada de inversión'),
+    'INV_OUT':         ('🛠️', 'Salida de inversión'),
+    'FIN_IN':          ('🏛️', 'Entrada de financiamiento'),
+    'FIN_OUT':         ('📉', 'Salida de financiamiento'),
 }
-INGRESOS = ('SALE', 'COLLECTION')   # tipos que suman al "monto" visual del historial
+INGRESOS = ('SALE', 'COLLECTION', 'PURCHASE_RETURN', 'INV_IN', 'FIN_IN')   # suman al "monto" visual
+
+OPC_REGISTRO = {
+    'SALE': '🛒 Venta', 'PURCHASE': '📥 Compra', 'EXPENSE': '💸 Gasto',
+    'COLLECTION': '💰 Cobro', 'PAYMENT': '🏦 Pago',
+    'RETURN': '↩️ Devolución', 'INVFIN': '🏗️ Inversión / Financ.',
+}
+OPC_INVFIN = {
+    'INV_IN':  '🏗️ Entrada de inversión (venta de equipos, rescate de inversiones)',
+    'INV_OUT': '🛠️ Salida de inversión (compra de maquinaria, equipos, mejoras)',
+    'FIN_IN':  '🏛️ Entrada de financiamiento (préstamo recibido, aporte de socios)',
+    'FIN_OUT': '📉 Salida de financiamiento (cuota de préstamo, retiro de socios)',
+}
+MESES = ['Ene', 'Feb', 'Mar', 'Abr', 'May', 'Jun', 'Jul', 'Ago', 'Sep', 'Oct', 'Nov', 'Dic']
 
 C_VERDE, C_ROJO, C_AZUL, C_AMARILLO, C_NARANJA, C_VIOLETA, C_GRIS = (
     '#3fb950', '#f85149', '#3a7bd5', '#e3b341', '#f0883e', '#bc8cff', '#6b7d9a')
@@ -144,6 +159,9 @@ def _seed_inicial():
     _reg_venta({5: 3, 4: 3}, 'Efectivo', 'PAID', None, '', ahora - timedelta(hours=3))
     _reg_venta({3: 4, 1: 6}, 'Fiado / Cta Corriente', 'PENDING', hoy + timedelta(days=7), 'Estudio Pérez', ahora - timedelta(hours=2))
     _reg_gasto('Servicios', 'Luz y gas', 18500, 'Efectivo', 'PAID', None, ahora - timedelta(hours=1))
+    _reg_inv_fin('INV_OUT', 'Máquina de café', 120000, 'Transferencia Bancaria', ahora - timedelta(days=2))
+    _reg_inv_fin('FIN_IN', 'Préstamo de socio', 200000, 'Transferencia Bancaria', ahora - timedelta(days=2))
+    _reg_devolucion('SALE_RETURN', 4, 1, 1300, 'Efectivo', 'Cliente', ahora - timedelta(hours=2))
 
 
 def _init_sim():
@@ -192,7 +210,7 @@ def _costo_receta(prod):
 
 
 def _recalcular_costo(prod):
-    """Si el producto tiene receta o mano de obra, su costo es el del escandallo."""
+    """Si el producto tiene receta o mano de obra, su costo es el de la receta."""
     if prod.get('receta') or prod.get('mano_obra'):
         prod['unit_cost'] = round(_costo_receta(prod), 2)
 
@@ -218,13 +236,14 @@ def _crear_producto(nombre, precio=0.0, costo=0.0, barcode='', minimo=5):
 # ==============================================================
 
 def _nueva_tx(tipo, descripcion, monto, medio, estado, vence=None, costo=0.0,
-              items=None, cuando=None, liquida_a=None):
+              items=None, cuando=None, liquida_a=None, discount=0.0):
     tx = {
         'id': _siguiente_id('transacciones'), 'type': tipo, 'description': descripcion,
         'amount': float(monto), 'cost_amount': float(costo), 'payment_method': medio,
         'status': estado, 'due_date': vence if estado == 'PENDING' else None,
         'created_at': cuando or datetime.now(), 'items': items or [],
         'anulada': False, 'liquidado_por': None, 'liquida_a': liquida_a,
+        'discount': float(discount),
     }
     _s('transacciones').append(tx)
     return tx
@@ -235,7 +254,7 @@ def _estado_efectivo(medio, estado):
     return 'PENDING' if _tipo_medio(medio) == 'credito' else estado
 
 
-def _reg_venta(carrito, medio, estado, vence, nota='', cuando=None):
+def _reg_venta(carrito, medio, estado, vence, nota='', cuando=None, descuento_pct=0.0):
     if not carrito:
         return False, 'El ticket está vacío.'
     for pid, qty in carrito.items():
@@ -244,20 +263,23 @@ def _reg_venta(carrito, medio, estado, vence, nota='', cuando=None):
             return False, 'Un producto del ticket ya no existe.'
         if p['current_stock'] < qty:
             return False, f"Stock insuficiente de {p['name']} (hay {p['current_stock']})."
-    items, monto, costo = [], 0.0, 0.0
+    items, bruto, costo = [], 0.0, 0.0
     for pid, qty in carrito.items():
         p = _producto(pid)
         items.append({'product_id': pid, 'name': p['name'], 'quantity': int(qty),
                       'unit_price': p['sale_price'], 'unit_cost': p['unit_cost']})
-        monto += qty * p['sale_price']
+        bruto += qty * p['sale_price']
         costo += qty * p['unit_cost']
         p['current_stock'] -= int(qty)
+    descuento = round(bruto * min(max(float(descuento_pct or 0), 0.0), 100.0) / 100, 2)
     desc = ', '.join(f"{i['quantity']}× {i['name']}" for i in items)
+    if descuento:
+        desc += f' (desc. {float(descuento_pct):g}%)'
     if nota:
         desc += f' — {nota}'
     estado = _estado_efectivo(medio, estado)
-    _nueva_tx('SALE', desc, monto, medio, estado, vence, costo, items, cuando)
-    return True, f'Venta registrada por {_fmt_money(monto)}.'
+    _nueva_tx('SALE', desc, bruto - descuento, medio, estado, vence, costo, items, cuando, discount=descuento)
+    return True, f'Venta registrada por {_fmt_money(bruto - descuento)}.'
 
 
 def _reg_compra(pid, cantidad, costo_unit, medio, estado, vence, cuando=None):
@@ -267,7 +289,7 @@ def _reg_compra(pid, cantidad, costo_unit, medio, estado, vence, cuando=None):
         return False, 'Producto inexistente.'
     stock_prev = p['current_stock']
     if not p.get('receta') and not p.get('mano_obra'):
-        # costo promedio ponderado (los productos con escandallo mantienen su costo de receta)
+        # costo promedio ponderado (los productos con receta mantienen su costo de receta)
         total_u = stock_prev + cantidad
         p['unit_cost'] = round((stock_prev * p['unit_cost'] + cantidad * costo_unit) / total_u, 2) if total_u else costo_unit
     p['current_stock'] = stock_prev + int(cantidad)
@@ -279,7 +301,7 @@ def _reg_compra(pid, cantidad, costo_unit, medio, estado, vence, cuando=None):
     return True, f'Compra registrada por {_fmt_money(cantidad * costo_unit)}.'
 
 
-def _reg_compra_multiple(lineas, medio, estado, vence, nota='', cuando=None):
+def _reg_compra_multiple(lineas, medio, estado, vence, nota='', cuando=None, descuento_pct=0.0):
     """Una sola transacción PURCHASE con varios productos.
     Cada línea: {'pid': id o None, 'nombre', 'qty', 'costo', 'precio', 'barcode', 'minimo'}.
     Si pid es None, crea el producto nuevo recién acá (al confirmar)."""
@@ -300,12 +322,15 @@ def _reg_compra_multiple(lineas, medio, estado, vence, nota='', cuando=None):
         items.append({'product_id': p['id'], 'name': p['name'], 'quantity': qty,
                       'unit_price': 0.0, 'unit_cost': costo})
         total += qty * costo
+    descuento = round(total * min(max(float(descuento_pct or 0), 0.0), 100.0) / 100, 2)
     desc = ', '.join(f"{i['quantity']}× {i['name']}" for i in items) + ' (compra)'
+    if descuento:
+        desc += f' (desc. {float(descuento_pct):g}%)'
     if nota:
         desc += f' — {nota}'
     estado = _estado_efectivo(medio, estado)
-    _nueva_tx('PURCHASE', desc, total, medio, estado, vence, 0.0, items, cuando)
-    return True, f'Compra registrada por {_fmt_money(total)} ({len(items)} producto(s)).'
+    _nueva_tx('PURCHASE', desc, total - descuento, medio, estado, vence, 0.0, items, cuando, discount=descuento)
+    return True, f'Compra registrada por {_fmt_money(total - descuento)} ({len(items)} producto(s)).'
 
 
 def _reg_gasto(categoria, descripcion, monto, medio, estado, vence, cuando=None):
@@ -313,6 +338,38 @@ def _reg_gasto(categoria, descripcion, monto, medio, estado, vence, cuando=None)
     estado = _estado_efectivo(medio, estado)
     _nueva_tx('EXPENSE', desc, monto, medio, estado, vence, 0.0, None, cuando)
     return True, f'Gasto registrado por {_fmt_money(monto)}.'
+
+
+def _reg_devolucion(tipo, pid, qty, unit, medio, nota='', cuando=None):
+    """SALE_RETURN: un cliente te devuelve mercadería (vuelve al stock y sale plata).
+    PURCHASE_RETURN: devolvés mercadería a un proveedor (sale del stock y recuperás plata)."""
+    p = _producto(pid)
+    if p is None:
+        return False, 'Producto inexistente.'
+    qty, unit = int(qty), float(unit)
+    if qty <= 0 or unit <= 0:
+        return False, 'La cantidad y el importe deben ser mayores a 0.'
+    items = [{'product_id': pid, 'name': p['name'], 'quantity': qty,
+              'unit_price': unit if tipo == 'SALE_RETURN' else 0.0, 'unit_cost': p['unit_cost']}]
+    if tipo == 'SALE_RETURN':
+        p['current_stock'] += qty
+        costo = qty * p['unit_cost']
+        desc = f"{qty}× {p['name']} (devolución de cliente)"
+    else:
+        if p['current_stock'] < qty:
+            return False, f"No hay stock suficiente de {p['name']} para devolver (hay {p['current_stock']})."
+        p['current_stock'] -= qty
+        costo = 0.0
+        desc = f"{qty}× {p['name']} (devolución a proveedor)"
+    if nota:
+        desc += f' — {nota}'
+    _nueva_tx(tipo, desc, qty * unit, medio, 'PAID', None, costo, items, cuando)
+    return True, f'Devolución registrada por {_fmt_money(qty * unit)}.'
+
+
+def _reg_inv_fin(tipo, descripcion, monto, medio, cuando=None):
+    _nueva_tx(tipo, descripcion or TIPOS_MOV[tipo][1], monto, medio, 'PAID', None, 0.0, None, cuando)
+    return True, f'{TIPOS_MOV[tipo][1]} registrada por {_fmt_money(monto)}.'
 
 
 def _reg_liquidacion(tx_id, medio, cuando=None):
@@ -344,6 +401,16 @@ def _anular(tx_id):
             p = _producto(it['product_id'])
             if p:
                 p['current_stock'] = max(0, p['current_stock'] - it['quantity'])
+    elif t['type'] == 'SALE_RETURN':
+        for it in t['items']:
+            p = _producto(it['product_id'])
+            if p:
+                p['current_stock'] = max(0, p['current_stock'] - it['quantity'])
+    elif t['type'] == 'PURCHASE_RETURN':
+        for it in t['items']:
+            p = _producto(it['product_id'])
+            if p:
+                p['current_stock'] += it['quantity']
     elif t['type'] in ('COLLECTION', 'PAYMENT'):
         orig = _tx(t['liquida_a'])
         if orig:
@@ -357,22 +424,40 @@ def _anular(tx_id):
 #  CÁLCULOS: caja, cuentas, resultados
 # ==============================================================
 
-def _movimientos_caja():
-    """[(medio, monto con signo)] de todo lo que realmente movió plata."""
+SIGNO_FLUJO = {'cobros': 1, 'compras': -1, 'gastos': -1,
+               'inv_in': 1, 'inv_out': -1, 'fin_in': 1, 'fin_out': -1}
+
+
+def _flujo_movs():
+    """[(fecha, categoría, monto, medio)] de todo lo que realmente movió plata.
+    Las devoluciones vienen con monto negativo dentro de su categoría (netean cobros / pagos)."""
     out = []
     for t in _s('transacciones'):
         if t['anulada']:
             continue
         tp, pagado, liq = t['type'], t['status'] == 'PAID', t['liquidado_por']
-        if tp == 'COLLECTION':
-            out.append((t['payment_method'], t['amount']))
+        f, a, m = t['created_at'].date(), t['amount'], t['payment_method']
+        if tp == 'COLLECTION' or (tp == 'SALE' and pagado and not liq):
+            out.append((f, 'cobros', a, m))
+        elif tp == 'SALE_RETURN':
+            out.append((f, 'cobros', -a, m))
         elif tp == 'PAYMENT':
-            out.append((t['payment_method'], -t['amount']))
-        elif tp == 'SALE' and pagado and not liq:
-            out.append((t['payment_method'], t['amount']))
-        elif tp in ('PURCHASE', 'EXPENSE') and pagado and not liq:
-            out.append((t['payment_method'], -t['amount']))
+            orig = _tx(t['liquida_a'])
+            out.append((f, 'compras' if orig and orig['type'] == 'PURCHASE' else 'gastos', a, m))
+        elif tp == 'PURCHASE' and pagado and not liq:
+            out.append((f, 'compras', a, m))
+        elif tp == 'EXPENSE' and pagado and not liq:
+            out.append((f, 'gastos', a, m))
+        elif tp == 'PURCHASE_RETURN':
+            out.append((f, 'compras', -a, m))
+        elif tp in ('INV_IN', 'INV_OUT', 'FIN_IN', 'FIN_OUT'):
+            out.append((f, tp.lower(), a, m))
     return out
+
+
+def _movimientos_caja():
+    """[(medio, monto con signo)] — lo usa _saldos()."""
+    return [(m, SIGNO_FLUJO[c] * a) for _f, c, a, m in _flujo_movs()]
 
 
 def _saldos():
@@ -384,6 +469,27 @@ def _saldos():
         elif tipo == 'banco':
             banco += monto
     return caja, banco
+
+
+def _flujo_mensual(anio):
+    """({categoría: [12 montos]}, saldo movido en años anteriores)."""
+    res = {c: [0.0] * 12 for c in SIGNO_FLUJO}
+    previo = 0.0
+    for f, c, a, _m in _flujo_movs():
+        if f.year == anio:
+            res[c][f.month - 1] += a
+        elif f.year < anio:
+            previo += SIGNO_FLUJO[c] * a
+    return res, previo
+
+
+def _mes_rangos(anio):
+    out = []
+    for m in range(1, 13):
+        ini = date(anio, m, 1)
+        fin = date(anio + 1, 1, 1) - timedelta(days=1) if m == 12 else date(anio, m + 1, 1) - timedelta(days=1)
+        out.append((ini, fin))
+    return out
 
 
 def _por_cobrar():
@@ -398,33 +504,41 @@ def _vencida(t):
     return bool(t['due_date']) and t['due_date'] < date.today()
 
 
-def _rango_periodo(opcion):
-    hoy = date.today()
-    return {
-        'Hoy': (hoy, hoy),
-        '7 días': (hoy - timedelta(days=6), hoy),
-        'Mes actual': (hoy.replace(day=1), hoy),
-        'Todo': (None, None),
-    }[opcion]
-
-
 def _en_periodo(t, desde, hasta):
     d = t['created_at'].date()
     return (desde is None or d >= desde) and (hasta is None or d <= hasta)
 
 
-def _pyl(desde, hasta):
-    """(ventas, costo de ventas, gastos operativos) — criterio devengado."""
-    ventas = cogs = gastos = 0.0
+def _pyl_detalle(desde, hasta):
+    """Estado de resultados completo (criterio devengado), igual a las filas de la planilla."""
+    d = dict.fromkeys(['ventas', 'devol', 'desc', 'cogs', 'dev_compras', 'desc_compras', 'gastos'], 0.0)
     for t in _s('transacciones'):
         if t['anulada'] or not _en_periodo(t, desde, hasta):
             continue
-        if t['type'] == 'SALE':
-            ventas += t['amount']
-            cogs += t['cost_amount']
-        elif t['type'] == 'EXPENSE':
-            gastos += t['amount']
-    return ventas, cogs, gastos
+        tp, dto = t['type'], t.get('discount', 0.0)
+        if tp == 'SALE':
+            d['ventas'] += t['amount'] + dto      # ventas a precio de lista
+            d['desc'] += dto
+            d['cogs'] += t['cost_amount']
+        elif tp == 'SALE_RETURN':
+            d['devol'] += t['amount']
+            d['cogs'] -= t['cost_amount']         # la mercadería vuelve al stock
+        elif tp == 'PURCHASE':
+            d['desc_compras'] += dto
+        elif tp == 'PURCHASE_RETURN':
+            d['dev_compras'] += t['amount']
+        elif tp == 'EXPENSE':
+            d['gastos'] += t['amount']
+    d['ventas_netas'] = d['ventas'] - d['devol'] - d['desc']
+    d['bruta'] = d['ventas_netas'] - d['cogs'] + d['dev_compras'] + d['desc_compras']
+    d['neta'] = d['bruta'] - d['gastos']
+    return d
+
+
+def _pyl(desde, hasta):
+    """(ventas netas, costo neto, gastos) — lo usan los KPIs y el PDF de cierre."""
+    d = _pyl_detalle(desde, hasta)
+    return d['ventas_netas'], d['cogs'] - d['dev_compras'] - d['desc_compras'], d['gastos']
 
 
 def _top_vendidos(n=8):
@@ -649,7 +763,6 @@ def _venta_busqueda():
                           help=f"Stock: {p['current_stock']}")
 
 
-
 def _venta_ticket():
     carrito = _s('carrito')
 
@@ -695,12 +808,14 @@ def _venta_ticket():
             nota = st.text_input('Cliente / nota (opcional)', key='pw_v_nota')
         with c4:
             vence = st.date_input('Vence (si queda pendiente)', value=date.today() + timedelta(days=15), key='pw_v_vence')
+        descuento = st.number_input('Descuento %', min_value=0.0, max_value=100.0, step=1.0, key='pw_v_desc')
         enviar = st.form_submit_button(
             f'✅ Confirmar venta · {_fmt_money(total)}' if carrito else '✅ Confirmar venta',
             type='primary', use_container_width=True, disabled=not carrito)
 
     if enviar:
-        ok, msg = _reg_venta(dict(carrito), medio, 'PAID' if estado == 'Pagado' else 'PENDING', vence, nota.strip())
+        ok, msg = _reg_venta(dict(carrito), medio, 'PAID' if estado == 'Pagado' else 'PENDING', vence,
+                             nota.strip(), descuento_pct=descuento)
         if ok:
             st.session_state[_key('carrito')] = {}
             if _tipo_medio(medio) == 'credito' or estado == 'Pendiente':
@@ -1008,6 +1123,8 @@ def _form_compra():
         with c5:
             vence = st.date_input('Vence (si queda pendiente)', value=date.today() + timedelta(days=15), key='pw_c_vence')
         nota = st.text_input('Proveedor / nota (opcional)', key='pw_c_nota')
+        descuento = st.number_input('Descuento del proveedor %', min_value=0.0, max_value=100.0, step=1.0,
+                                    key='pw_c_desc')
         enviar = st.form_submit_button(
             f'📥 Registrar compra · {_fmt_money(total)}' if lineas else '📥 Registrar compra',
             type='primary', use_container_width=True, disabled=not lineas)
@@ -1016,7 +1133,7 @@ def _form_compra():
 
     if enviar:
         ok, msg = _reg_compra_multiple(list(lineas), medio, 'PAID' if estado == 'Pagado' else 'PENDING',
-                                       vence, nota.strip())
+                                       vence, nota.strip(), descuento_pct=descuento)
         if ok:
             _compra_vaciar()
         _flash(msg, 'success' if ok else 'warning')
@@ -1076,12 +1193,67 @@ def _form_liquidacion(es_cobro):
         st.rerun()
 
 
+def _form_devolucion():
+    productos = _s('productos')
+    if not productos:
+        st.info('Primero cargá productos.')
+        return
+    tipo = st.radio('Tipo de devolución', ['SALE_RETURN', 'PURCHASE_RETURN'], horizontal=True, key='pw_dv_tipo',
+                    format_func={'SALE_RETURN': '↩️ Un cliente me devuelve (venta)',
+                                 'PURCHASE_RETURN': '📤 Yo devuelvo a un proveedor (compra)'}.get)
+    es_venta = tipo == 'SALE_RETURN'
+    opciones = {f"{p['name']} (stock {p['current_stock']})": p['id'] for p in productos}
+    sel = st.selectbox('Producto', list(opciones), key='pw_dv_prod')
+    p = _producto(opciones[sel])
+    with st.form('pw_form_devolucion', clear_on_submit=True):
+        c1, c2 = st.columns(2)
+        with c1:
+            cantidad = st.number_input('Cantidad', min_value=1, step=1, value=1, key='pw_dv_qty')
+        with c2:
+            unit = st.number_input('Importe unitario devuelto al cliente' if es_venta else 'Importe unitario que te devuelven',
+                                   min_value=0.0, step=10.0,
+                                   value=float(p['sale_price'] if es_venta else p['unit_cost']),
+                                   key=f"pw_dv_unit_{tipo}_{p['id']}")
+        c3, c4 = st.columns(2)
+        with c3:
+            medio = st.selectbox('Medio por el que se devuelve la plata', _medios_activos(incluir_credito=False),
+                                 key='pw_dv_medio')
+        with c4:
+            nota = st.text_input('Motivo / cliente / proveedor (opcional)', key='pw_dv_nota')
+        enviar = st.form_submit_button('↩️ Registrar devolución', type='primary', use_container_width=True)
+    st.caption('Ajusta el stock y la caja al instante. Aparece en el Estado de Resultados como '
+               + ('«(−) Devoluciones».' if es_venta else '«(+) Devoluciones por Compras».'))
+    if enviar:
+        ok, msg = _reg_devolucion(tipo, p['id'], cantidad, unit, medio, nota.strip())
+        _flash(msg, 'success' if ok else 'warning')
+        st.rerun()
+
+
+def _form_inv_fin():
+    with st.form('pw_form_invfin', clear_on_submit=True):
+        tipo = st.selectbox('Tipo', list(OPC_INVFIN), format_func=OPC_INVFIN.get, key='pw_if_tipo')
+        c1, c2 = st.columns(2)
+        with c1:
+            monto = st.number_input('Monto', min_value=0.0, step=1000.0, key='pw_if_monto')
+        with c2:
+            medio = st.selectbox('Medio', _medios_activos(incluir_credito=False), key='pw_if_medio')
+        descripcion = st.text_input('Descripción', key='pw_if_desc', placeholder='Ej: Heladera nueva / Cuota préstamo')
+        enviar = st.form_submit_button('🏗️ Registrar', type='primary', use_container_width=True)
+    st.caption('Mueve la caja pero NO afecta el Estado de Resultados: solo aparece en el Flujo de Caja.')
+    if enviar:
+        if monto <= 0:
+            st.warning('El monto debe ser mayor a 0.')
+        else:
+            ok, msg = _reg_inv_fin(tipo, descripcion.strip(), float(monto), medio)
+            _flash(msg)
+            st.rerun()
+
+
 def _modulo_a():
     with st.container(border=True):
         _titulo('⚡ A · Registradora exprés')
-        tipo = st.radio('Tipo de movimiento', list(TIPOS_MOV), key='pw_tipo_mov', horizontal=True,
-                        format_func=lambda k: f'{TIPOS_MOV[k][0]} {TIPOS_MOV[k][1]}',
-                        label_visibility='collapsed')
+        tipo = st.radio('Tipo de movimiento', list(OPC_REGISTRO), key='pw_tipo_mov', horizontal=True,
+                        format_func=OPC_REGISTRO.get, label_visibility='collapsed')
         if tipo == 'SALE':
             _form_venta()
         elif tipo == 'PURCHASE':
@@ -1090,8 +1262,13 @@ def _modulo_a():
             _form_gasto()
         elif tipo == 'COLLECTION':
             _form_liquidacion(True)
-        else:
+        elif tipo == 'PAYMENT':
             _form_liquidacion(False)
+        elif tipo == 'RETURN':
+            _form_devolucion()
+        else:
+            _form_inv_fin()
+
 
 # ==============================================================
 #  CALCULADORA DE PRECIOS (pasarelas, plataformas, impuestos, cuotas)
@@ -1395,9 +1572,10 @@ def _bloque_calculadora_precios():
                         filas.append(fila)
                     st.dataframe(pd.DataFrame(filas), use_container_width=True, hide_index=True)
                     st.caption('Mantiene el margen elegido: el recargo de cada cuota se suma a los cargos que se lleva el precio.')
-                    
+
+
 # ==============================================================
-#  MÓDULO B — INVENTARIO + CALCULADORA DE COSTOS
+#  MÓDULO B — INVENTARIO + RECETA Y COSTO + CALCULADORA DE PRECIOS
 # ==============================================================
 
 def _bloque_catalogo():
@@ -1409,16 +1587,19 @@ def _bloque_catalogo():
     if not vistos:
         st.info('Todavía no hay productos.' if not productos else 'Sin resultados para ese filtro.')
         return
-    filas = []
+    filas, bajos = [], []
     for p in vistos:
         margen = (p['sale_price'] - p['unit_cost']) / p['sale_price'] * 100 if p['sale_price'] else 0
-        filas.append({'Código': p['barcode'] or '—', 'Producto': p['name'], 'Stock': p['current_stock'],
+        bajo = p['current_stock'] < p['min_stock']
+        bajos.append(bajo)
+        filas.append({'Código': p['barcode'] or '—', 'Producto': p['name'],
+                      'Stock': f"⚠️ {p['current_stock']}" if bajo else str(p['current_stock']),
                       'Mínimo': p['min_stock'], 'Costo': p['unit_cost'], 'Precio': p['sale_price'],
                       'Margen': margen})
     df = pd.DataFrame(filas)
 
     def _rojo(row):
-        if row['Stock'] < row['Mínimo']:
+        if bajos[row.name]:
             return ['background-color:#2a0a0a;color:#f85149;font-weight:600'] * len(row)
         return [''] * len(row)
 
@@ -1444,9 +1625,9 @@ def _bloque_nuevo_producto():
                 stock = st.number_input('Stock inicial', min_value=0, step=1, key='pw_p_stock')
             with o2:
                 minimo = st.number_input('Stock mínimo', min_value=0, step=1, value=5, key='pw_p_min')
-                costo = st.number_input('Costo (si no usás escandallo)', min_value=0.0, step=10.0, key='pw_p_costo')
+                costo = st.number_input('Costo (si no usás receta)', min_value=0.0, step=10.0, key='pw_p_costo')
         enviar = st.form_submit_button('➕ Crear producto', type='primary', use_container_width=True)
-    st.caption('Solo pide nombre y precio. El costo se calcula solo con el escandallo o con las compras.')
+    st.caption('Solo pide nombre y precio. El costo se calcula solo con la receta o con las compras.')
 
     if enviar:
         barcode = barcode.strip()
@@ -1502,10 +1683,11 @@ def _bloque_ajustes():
             st.rerun()
 
 
-def _bloque_escandallo():
+def _bloque_receta():
+    """Receta y costo del producto (insumos + mano de obra)."""
     productos = _s('productos')
     insumos = _s('insumos')
-    with st.expander('🧮 Calculadora de costos (escandallo / BOM)'):
+    with st.expander('🧮 Receta y costo del producto'):
         if not productos:
             st.info('Creá un producto primero.')
             return
@@ -1637,7 +1819,7 @@ def _modulo_b():
             _bloque_nuevo_producto()
         with der:
             _bloque_ajustes()
-            _bloque_escandallo()
+            _bloque_receta()
             _bloque_insumos()
         _bloque_calculadora_precios()
 
@@ -1654,17 +1836,205 @@ def _estado_txt(t):
     return '⚠️ Pendiente (vencida)' if _vencida(t) else '⏳ Pendiente'
 
 
+# ---------- Filtros y exportación del historial ----------
+
+def _filtrar_historial(lista, texto, medios, tipos, m_min, m_max, estado):
+    q = (texto or '').strip().lower().lstrip('#')
+    out = []
+    for t in lista:
+        if q and not (q in t['description'].lower() or q in t['payment_method'].lower() or q == str(t['id'])):
+            continue
+        if medios and t['payment_method'] not in medios:
+            continue
+        if tipos and t['type'] not in tipos:
+            continue
+        if t['amount'] < m_min or (m_max > 0 and t['amount'] > m_max):
+            continue
+        if estado == 'Pagado' and (t['anulada'] or t['status'] != 'PAID'):
+            continue
+        if estado == 'Pendiente' and (t['anulada'] or t['status'] != 'PENDING'):
+            continue
+        if estado == 'Anulada' and not t['anulada']:
+            continue
+        out.append(t)
+    return out
+
+
+def _estado_plano(t):
+    return 'Anulada' if t['anulada'] else ('Pagado' if t['status'] == 'PAID' else 'Pendiente')
+
+
+def _df_export(lista):
+    filas = []
+    for t in sorted(lista, key=lambda t: (t['created_at'], t['id'])):
+        signo = 1 if t['type'] in INGRESOS else -1
+        filas.append({'N°': t['id'], 'Fecha': t['created_at'].strftime('%Y-%m-%d %H:%M'),
+                      'Tipo': TIPOS_MOV[t['type']][1], 'Detalle': t['description'],
+                      'Medio': t['payment_method'], 'Estado': _estado_plano(t),
+                      'Vence': t['due_date'].isoformat() if t['due_date'] else '',
+                      'Monto': signo * t['amount'], 'Costo': t['cost_amount']})
+    return pd.DataFrame(filas)
+
+
+def _df_inventario():
+    return pd.DataFrame([{'Código': p['barcode'], 'Producto': p['name'], 'Stock': p['current_stock'],
+                          'Mínimo': p['min_stock'], 'Costo': p['unit_cost'], 'Precio': p['sale_price']}
+                         for p in _s('productos')])
+
+
+def _excel_bytes(lista):
+    buf = io.BytesIO()
+    with pd.ExcelWriter(buf, engine='openpyxl') as w:
+        _df_export(lista).to_excel(w, sheet_name='Transacciones', index=False)
+        _df_inventario().to_excel(w, sheet_name='Inventario', index=False)
+    return buf.getvalue()
+
+
+def _pdf_txt(s):
+    """El PDF base solo soporta caracteres latinos: saco emojis y símbolos raros."""
+    s = str(s).replace('−', '-').replace('×', 'x')
+    return s.encode('cp1252', 'ignore').decode('cp1252')
+
+
+def _pdf_cierre(dia):
+    from reportlab.lib import colors
+    from reportlab.lib.pagesizes import A4
+    from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+    from reportlab.lib.units import mm
+    from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
+
+    def P(txt, st_):
+        return Paragraph(_esc(_pdf_txt(txt)), st_)
+
+    estilos = getSampleStyleSheet()
+    chico = ParagraphStyle('chico', parent=estilos['BodyText'], fontSize=8, leading=10)
+    txs = sorted([t for t in _s('transacciones') if not t['anulada'] and t['created_at'].date() == dia],
+                 key=lambda t: (t['created_at'], t['id']))
+    ventas, cogs, gastos = _pyl(dia, dia)
+    caja, banco = _saldos()
+    por_cobrar = sum(t['amount'] for t in _por_cobrar())
+    por_pagar = sum(t['amount'] for t in _por_pagar())
+
+    por_medio, unidades = {}, {}
+    for t in txs:
+        if t['type'] == 'SALE':
+            por_medio[t['payment_method']] = por_medio.get(t['payment_method'], 0) + t['amount']
+            for it in t['items']:
+                unidades[it['name']] = unidades.get(it['name'], 0) + it['quantity']
+
+    def tabla(filas, anchos, header=True):
+        tb = Table(filas, colWidths=anchos)
+        est = [('FONTSIZE', (0, 0), (-1, -1), 9), ('VALIGN', (0, 0), (-1, -1), 'TOP'),
+               ('LINEBELOW', (0, 0), (-1, -1), 0.25, colors.lightgrey)]
+        if header:
+            est += [('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#0d1520')),
+                    ('TEXTCOLOR', (0, 0), (-1, 0), colors.white)]
+        tb.setStyle(TableStyle(est))
+        return tb
+
+    buf = io.BytesIO()
+    doc = SimpleDocTemplate(buf, pagesize=A4, leftMargin=15 * mm, rightMargin=15 * mm,
+                            topMargin=15 * mm, bottomMargin=15 * mm)
+    el = [P(f"Cierre del día · {get_nombre_negocio() or 'Mi negocio'}", estilos['Title']),
+          P(f"Fecha: {dia.strftime('%d/%m/%Y')}", estilos['Normal']), Spacer(1, 8)]
+
+    el.append(P('Resultado del día', estilos['Heading3']))
+    el.append(tabla([['Ventas', _fmt_money(ventas)], ['(-) Costo de ventas', _fmt_money(cogs)],
+                     ['= Utilidad bruta', _fmt_money(ventas - cogs)], ['(-) Gastos', _fmt_money(gastos)],
+                     ['= Resultado neto', _fmt_money(ventas - cogs - gastos)]], [90 * mm, 40 * mm], False))
+
+    el.append(P('Situación financiera (a hoy)', estilos['Heading3']))
+    el.append(tabla([['Caja chica', _fmt_money(caja)], ['Bancos / Digital', _fmt_money(banco)],
+                     ['Por cobrar', _fmt_money(por_cobrar)], ['Por pagar', _fmt_money(por_pagar)]],
+                    [90 * mm, 40 * mm], False))
+
+    if por_medio:
+        el.append(P('Ventas por medio de pago', estilos['Heading3']))
+        el.append(tabla([['Medio', 'Monto']] + [[_pdf_txt(m), _fmt_money(v)] for m, v in por_medio.items()],
+                        [90 * mm, 40 * mm]))
+    if unidades:
+        el.append(P('Productos vendidos', estilos['Heading3']))
+        el.append(tabla([['Producto', 'Unidades']] + [[_pdf_txt(n), str(u)] for n, u in
+                                                      sorted(unidades.items(), key=lambda x: -x[1])],
+                        [90 * mm, 40 * mm]))
+
+    el.append(P('Operaciones del día', estilos['Heading3']))
+    if txs:
+        filas = [['Hora', 'Tipo', 'Detalle', 'Medio', 'Estado', 'Monto']]
+        for t in txs:
+            filas.append([t['created_at'].strftime('%H:%M'), P(TIPOS_MOV[t['type']][1], chico),
+                          P(t['description'], chico), P(t['payment_method'], chico),
+                          _estado_plano(t), _fmt_money(t['amount'])])
+        el.append(tabla(filas, [14 * mm, 20 * mm, 62 * mm, 30 * mm, 22 * mm, 26 * mm]))
+    else:
+        el.append(P('Sin operaciones en la fecha.', estilos['Normal']))
+    doc.build(el)
+    return buf.getvalue()
+
+
+def _bloque_exportar(lista):
+    with st.expander('📤 Exportar / cierre del día'):
+        st.caption(f'CSV y Excel exportan las {len(lista)} operaciones que se ven con los filtros actuales.')
+        e1, e2 = st.columns(2)
+        stamp = date.today().strftime('%Y%m%d')
+        with e1:
+            csv = _df_export(lista).to_csv(index=False, sep=';', decimal=',').encode('utf-8-sig')
+            st.download_button('⬇️ CSV', csv, file_name=f'transacciones_{stamp}.csv', mime='text/csv',
+                               use_container_width=True, key='pw_dl_csv')
+        with e2:
+            try:
+                st.download_button('⬇️ Excel', _excel_bytes(lista), file_name=f'transacciones_{stamp}.xlsx',
+                                   mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+                                   use_container_width=True, key='pw_dl_xlsx')
+            except Exception:
+                st.caption('Para exportar a Excel agregá `openpyxl` a requirements.txt.')
+
+        st.markdown('**Resumen del día en PDF**')
+        p1, p2 = st.columns([2, 3])
+        with p1:
+            dia = st.date_input('Día', value=date.today(), key='pw_dl_dia', label_visibility='collapsed')
+        with p2:
+            try:
+                st.download_button('📄 Descargar cierre del día (PDF)', _pdf_cierre(dia),
+                                   file_name=f'cierre_{dia.strftime("%Y%m%d")}.pdf', mime='application/pdf',
+                                   use_container_width=True, key='pw_dl_pdf')
+            except ImportError:
+                st.caption('Para generar el PDF agregá `reportlab` a requirements.txt.')
+
+
 def _modulo_c():
     with st.container(border=True):
         _titulo('🧾 C · Historial de transacciones')
-        alcance = st.radio('Mostrar', ['Hoy', 'Últimas 50'], horizontal=True, key='pw_hist_alcance',
+        alcance = st.radio('Mostrar', ['Hoy', 'Últimas 50', 'Todo'], horizontal=True, key='pw_hist_alcance',
                            label_visibility='collapsed')
         todas = sorted(_s('transacciones'), key=lambda t: (t['created_at'], t['id']), reverse=True)
         if alcance == 'Hoy':
             hoy = date.today()
-            lista = [t for t in todas if t['created_at'].date() == hoy]
+            base = [t for t in todas if t['created_at'].date() == hoy]
+        elif alcance == 'Últimas 50':
+            base = todas[:50]
         else:
-            lista = todas[:50]
+            base = todas
+
+        texto = st.text_input('Buscar', key='pw_hist_q', label_visibility='collapsed',
+                              placeholder='🔎 Buscar por cliente, detalle, medio de pago o #número')
+        with st.expander('Filtros avanzados (tipo, medio, monto, estado)'):
+            f1, f2 = st.columns(2)
+            with f1:
+                tipos_sel = st.multiselect('Tipo', list(TIPOS_MOV), key='pw_hist_tipos',
+                                           format_func=lambda k: f'{TIPOS_MOV[k][0]} {TIPOS_MOV[k][1]}')
+            with f2:
+                medios_sel = st.multiselect('Medio de pago', [m['name'] for m in _s('medios')], key='pw_hist_medios')
+            g1, g2, g3 = st.columns(3)
+            with g1:
+                m_min = st.number_input('Monto desde', min_value=0.0, step=1000.0, key='pw_hist_min')
+            with g2:
+                m_max = st.number_input('Monto hasta (0 = sin tope)', min_value=0.0, step=1000.0, key='pw_hist_max')
+            with g3:
+                estado_f = st.selectbox('Estado', ['Todos', 'Pagado', 'Pendiente', 'Anulada'], key='pw_hist_estado')
+
+        lista = _filtrar_historial(base, texto, medios_sel, tipos_sel, m_min, m_max, estado_f)
+        st.caption(f'Mostrando {len(lista)} de {len(base)} operaciones.')
 
         if not lista:
             st.info('No hay operaciones para mostrar.')
@@ -1679,6 +2049,8 @@ def _modulo_c():
                           'Estado': _estado_txt(t), 'Monto': f"{signo}{_fmt_money(t['amount'])}"})
         st.dataframe(pd.DataFrame(filas), use_container_width=True, hide_index=True,
                      height=min(360, len(filas) * 36 + 42))
+
+        _bloque_exportar(lista)
 
         activas = [t for t in lista if not t['anulada']]
         with st.expander('✏️ Editar o anular una operación'):
@@ -1724,96 +2096,181 @@ def _modulo_c():
 
 
 # ==============================================================
-#  MÓDULO D — REPORTES FINANCIEROS EN TIEMPO REAL
+#  MÓDULO D — ESTADOS FINANCIEROS (Ene–Dic + Total)
 # ==============================================================
+
+_TBL_CSS = ('<style>'
+            '.pw-tbl{border-collapse:collapse;width:100%;min-width:980px;font-size:12px}'
+            '.pw-tbl th{padding:8px;color:#fff;text-align:right;font-weight:700}'
+            '.pw-tbl th:first-child,.pw-tbl td:first-child{text-align:left;position:sticky;left:0;'
+            'background:#0d1117;min-width:200px;color:#c9d1d9}'
+            '.pw-tbl td{padding:6px 8px;text-align:right;border-bottom:1px solid #21262d;white-space:nowrap}'
+            '.pw-tbl tr.sub td{background:#10243b;font-weight:700}'
+            '.pw-tbl tr.tot td{background:#12351f;font-weight:800;font-size:13px}'
+            '.pw-tbl tr.sec td{background:#161b22;color:#58a6ff;font-weight:700;text-align:left}'
+            '</style>')
+
+
+def _celda(v, color, neg_rojo=True):
+    if abs(v) < 0.005:
+        return f'<td style="color:{C_GRIS}">–</td>'
+    c = C_ROJO if (v < 0 and neg_rojo) else color
+    return f'<td style="color:{c}">{_fmt_money(v)}</td>'
+
+
+def _tabla_mensual(titulo, color, filas):
+    """filas: (etiqueta, [12 valores], tipo[, total]) con tipo: n | ded | add | sub | tot | sec."""
+    estilos = {'n': ('', '#c9d1d9', True), 'ded': ('', C_ROJO, False), 'add': ('', C_VERDE, False),
+               'sub': ('sub', '#e6edf3', True), 'tot': ('tot', '#ffffff', True)}
+    th = f'<th style="background:{color}">'
+    h = [_TBL_CSS, '<div style="overflow-x:auto"><table class="pw-tbl"><thead><tr>', f'{th}{_esc(titulo)}</th>']
+    h += [f'{th}{m}</th>' for m in MESES]
+    h.append(f'{th}Total</th></tr></thead><tbody>')
+    for fila in filas:
+        etiqueta, vals, tipo = fila[0], fila[1], fila[2]
+        if tipo == 'sec':
+            h.append(f'<tr class="sec"><td colspan="14">{_esc(etiqueta)}</td></tr>')
+            continue
+        total = fila[3] if len(fila) > 3 else sum(vals)
+        clase, c, neg = estilos[tipo]
+        h.append(f'<tr class="{clase}"><td>{_esc(etiqueta)}</td>'
+                 + ''.join(_celda(v, c, neg) for v in vals) + _celda(total, c, neg) + '</tr>')
+    h.append('</tbody></table></div>')
+    st.markdown(''.join(h), unsafe_allow_html=True)
+
 
 def _modulo_d():
     with st.container(border=True):
-        _titulo('📊 D · Reportes financieros')
-        periodo = st.radio('Período', ['Hoy', '7 días', 'Mes actual', 'Todo'], horizontal=True,
-                           index=2, key='pw_periodo', label_visibility='collapsed')
-        desde, hasta = _rango_periodo(periodo)
+        _titulo('📊 D · Estados financieros')
+        anios = sorted({t['created_at'].year for t in _s('transacciones')} | {date.today().year}, reverse=True)
+        a1, _a2 = st.columns([1, 3])
+        with a1:
+            anio = st.selectbox('Año', anios, key='pw_anio')
+        t_er, t_fc, t_res = st.tabs(['📈 Estado de resultados', '💵 Flujo de caja', '🧭 Resumen y vencimientos'])
 
-        ventas, cogs, gastos = _pyl(desde, hasta)
-        bruta = ventas - cogs
-        neta = bruta - gastos
-        margen_neto = (neta / ventas * 100) if ventas else 0
+        det = [_pyl_detalle(i, f) for i, f in _mes_rangos(anio)]
 
-        caja, banco = _saldos()
-        cobrar, pagar = _por_cobrar(), _por_pagar()
-        t_cobrar, t_pagar = sum(t['amount'] for t in cobrar), sum(t['amount'] for t in pagar)
-        disponible = caja + banco
-        proyectado = disponible + t_cobrar - t_pagar
+        def col(k):
+            return [d[k] for d in det]
 
-        izq, der = st.columns([1, 1], gap='medium')
-        with izq:
-            st.markdown('**Estado de Resultados (P&L)**')
-            st.markdown(
-                _fila_html('Ventas totales', _fmt_money(ventas), C_VERDE)
-                + _fila_html('(−) Costo de ventas (COGS)', _fmt_money(cogs), C_ROJO, tenue=True)
-                + _fila_html('= Utilidad bruta', _fmt_money(bruta), '#e6edf3', fuerte=True, linea=True)
-                + _fila_html('(−) Gastos operativos', _fmt_money(gastos), C_ROJO, tenue=True)
-                + _fila_html('= Utilidad / Pérdida neta', _fmt_money(neta), C_VERDE if neta >= 0 else C_ROJO,
-                             fuerte=True, linea=True)
-                + _fila_html('Margen neto', f'{margen_neto:.1f}%', C_GRIS, tenue=True),
-                unsafe_allow_html=True)
+        # ---------------- Estado de resultados ----------------
+        with t_er:
+            vn, ub, un = sum(col('ventas_netas')), sum(col('bruta')), sum(col('neta'))
+            _kpi_row([
+                ('Ventas netas', _fmt_money(vn), f'Año {anio}', C_VERDE),
+                ('Utilidad bruta', _fmt_money(ub), f'{ub / vn * 100:.0f}% de las ventas netas' if vn else '—', C_AZUL),
+                ('Utilidad neta', _fmt_money(un), 'Después de gastos', C_VERDE if un >= 0 else C_ROJO),
+                ('Margen neto', f'{un / vn * 100:.1f}%' if vn else '0.0%', 'Sobre ventas netas', C_AMARILLO),
+            ])
+            _tabla_mensual('Estado de resultados', '#2f6fd0', [
+                ('Ventas', col('ventas'), 'n'),
+                ('(−) Devoluciones', col('devol'), 'ded'),
+                ('(−) Descuentos por Ventas', col('desc'), 'ded'),
+                ('Ventas Netas', col('ventas_netas'), 'sub'),
+                ('(−) Costo de Ventas', col('cogs'), 'ded'),
+                ('(+) Devoluciones por Compras', col('dev_compras'), 'add'),
+                ('(+) Descuentos por Compras', col('desc_compras'), 'add'),
+                ('Utilidad Bruta', col('bruta'), 'sub'),
+                ('(−) Gastos', col('gastos'), 'ded'),
+                ('Utilidad Neta', col('neta'), 'tot'),
+            ])
+            st.caption('Criterio devengado: la venta o el gasto cuenta el día que se registra, aunque se cobre o pague después. '
+                       'El costo de ventas sale del costo de los productos vendidos.')
 
-            if periodo != 'Hoy':
-                v_d, g_d = {}, {}
-                for t in _s('transacciones'):
-                    if t['anulada'] or not _en_periodo(t, desde, hasta):
-                        continue
-                    d = t['created_at'].date().isoformat()
-                    if t['type'] == 'SALE':
-                        v_d[d] = v_d.get(d, 0) + t['amount']
-                    elif t['type'] == 'EXPENSE':
-                        g_d[d] = g_d.get(d, 0) + t['amount']
-                if v_d or g_d:
-                    st.markdown('<div style="height:10px"></div>**Ventas vs. gastos por día**', unsafe_allow_html=True)
-                    df = pd.DataFrame({'Ventas': pd.Series(v_d, dtype=float),
-                                       'Gastos': pd.Series(g_d, dtype=float)}).fillna(0).sort_index()
-                    df['Fecha'] = pd.to_datetime(df.index).strftime('%d/%m')
-                    orden = list(df['Fecha'])
-                    largo = df.melt(id_vars='Fecha', value_vars=['Ventas', 'Gastos'],
-                                    var_name='Concepto', value_name='Monto')
-                    grafico = alt.Chart(largo).mark_bar().encode(
-                        x=alt.X('Fecha:N', sort=orden, axis=alt.Axis(labelAngle=-45, title=None)),
-                        xOffset='Concepto:N',
-                        y=alt.Y('Monto:Q', title=None),
-                        color=alt.Color('Concepto:N',
-                                        scale=alt.Scale(domain=['Ventas', 'Gastos'], range=[C_VERDE, C_ROJO]),
-                                        legend=alt.Legend(orient='bottom', title=None)),
-                        tooltip=['Fecha', 'Concepto', alt.Tooltip('Monto:Q', format=',.0f')],
-                    ).properties(height=240)
-                    st.altair_chart(grafico, use_container_width=True)
+        # ---------------- Flujo de caja ----------------
+        with t_fc:
+            fl, previo = _flujo_mensual(anio)
+            rng = range(12)
+            op = [fl['cobros'][i] - fl['compras'][i] - fl['gastos'][i] for i in rng]
+            inv = [fl['inv_in'][i] - fl['inv_out'][i] for i in rng]
+            fin = [fl['fin_in'][i] - fl['fin_out'][i] for i in rng]
+            total = [op[i] + inv[i] + fin[i] for i in rng]
+            ini, cierre, acum = [], [], _s('saldo_caja') + _s('saldo_banco') + previo
+            for v in total:
+                ini.append(acum)
+                acum += v
+                cierre.append(acum)
 
-        with der:
-            st.markdown('**Flujo de Caja** (a hoy)')
-            st.markdown(
-                _fila_html('Caja chica', _fmt_money(caja), tenue=True)
-                + _fila_html('Bancos / Digital', _fmt_money(banco), tenue=True)
-                + _fila_html('= Dinero disponible', _fmt_money(disponible), C_AZUL, fuerte=True, linea=True)
-                + _fila_html(f'(+) Cuentas por cobrar ({len(cobrar)})', _fmt_money(t_cobrar), C_VERDE, tenue=True)
-                + _fila_html(f'(−) Cuentas por pagar ({len(pagar)})', _fmt_money(t_pagar), C_ROJO, tenue=True)
-                + _fila_html('= Posición proyectada', _fmt_money(proyectado), C_VERDE if proyectado >= 0 else C_ROJO,
-                             fuerte=True, linea=True),
-                unsafe_allow_html=True)
+            _kpi_row([
+                ('Flujo operativo', _fmt_money(sum(op)), f'Año {anio}', C_VERDE if sum(op) >= 0 else C_ROJO),
+                ('Flujo de inversión', _fmt_money(sum(inv)), 'Neto', C_AZUL if sum(inv) >= 0 else C_NARANJA),
+                ('Flujo de financiamiento', _fmt_money(sum(fin)), 'Neto', C_VIOLETA),
+                ('Flujo total', _fmt_money(sum(total)), f'Saldo final {_fmt_money(cierre[-1])}',
+                 C_VERDE if sum(total) >= 0 else C_ROJO),
+            ])
+            _tabla_mensual('Flujo de caja', '#17a2b8', [
+                ('Actividades operativas', [], 'sec'),
+                ('Ventas (Cobros)', fl['cobros'], 'n'),
+                ('(−) Compras (Pagos)', fl['compras'], 'ded'),
+                ('(−) Gastos (Pagos)', fl['gastos'], 'ded'),
+                ('Flujo Operativo', op, 'sub'),
+                ('Actividades de inversión', [], 'sec'),
+                ('Entradas de Inversión', fl['inv_in'], 'n'),
+                ('(−) Salidas de Inversión', fl['inv_out'], 'ded'),
+                ('Flujo de Inversión Neto', inv, 'sub'),
+                ('Actividades de financiamiento', [], 'sec'),
+                ('Entradas de Financiamiento', fl['fin_in'], 'n'),
+                ('(−) Salidas de Financiamiento', fl['fin_out'], 'ded'),
+                ('Flujo de Financiamiento Neto', fin, 'sub'),
+                ('Flujo Total del Período', total, 'tot'),
+                ('Saldo inicial (caja + bancos)', ini, 'n', ini[0]),
+                ('Saldo final (caja + bancos)', cierre, 'sub', cierre[-1]),
+            ])
+            st.caption('Solo cuenta plata que realmente entró o salió (el fiado pendiente no cuenta hasta que se cobra o paga). '
+                       'Las devoluciones restan de cobros o de pagos según corresponda.')
 
-            venc = [t for t in cobrar + pagar if _vencida(t)]
-            if venc:
-                st.warning(f'⚠️ Hay {len(venc)} cuenta(s) vencida(s) sin saldar.')
+        # ---------------- Resumen y vencimientos ----------------
+        with t_res:
+            caja, banco = _saldos()
+            cobrar, pagar = _por_cobrar(), _por_pagar()
+            t_cobrar, t_pagar = sum(t['amount'] for t in cobrar), sum(t['amount'] for t in pagar)
+            disponible = caja + banco
+            proyectado = disponible + t_cobrar - t_pagar
 
-            pend = sorted(cobrar + pagar, key=lambda t: (t['due_date'] is None, t['due_date'] or date.max))[:6]
-            if pend:
-                st.markdown('<div style="height:10px"></div>**Próximos vencimientos**', unsafe_allow_html=True)
-                df = pd.DataFrame([{
-                    '': '⚠️' if _vencida(t) else '',
-                    'Tipo': 'Por cobrar' if t['type'] == 'SALE' else 'Por pagar',
-                    'Detalle': t['description'][:45],
-                    'Vence': t['due_date'].strftime('%d/%m') if t['due_date'] else '—',
-                    'Monto': _fmt_money(t['amount']),
-                } for t in pend])
-                st.dataframe(df, use_container_width=True, hide_index=True, height=min(260, len(df) * 36 + 42))
+            izq, der = st.columns(2, gap='medium')
+            with izq:
+                st.markdown('**Posición financiera** (a hoy)')
+                st.markdown(
+                    _fila_html('Caja chica', _fmt_money(caja), tenue=True)
+                    + _fila_html('Bancos / Digital', _fmt_money(banco), tenue=True)
+                    + _fila_html('= Dinero disponible', _fmt_money(disponible), C_AZUL, fuerte=True, linea=True)
+                    + _fila_html(f'(+) Cuentas por cobrar ({len(cobrar)})', _fmt_money(t_cobrar), C_VERDE, tenue=True)
+                    + _fila_html(f'(−) Cuentas por pagar ({len(pagar)})', _fmt_money(t_pagar), C_ROJO, tenue=True)
+                    + _fila_html('= Posición proyectada', _fmt_money(proyectado),
+                                 C_VERDE if proyectado >= 0 else C_ROJO, fuerte=True, linea=True),
+                    unsafe_allow_html=True)
+                venc = [t for t in cobrar + pagar if _vencida(t)]
+                if venc:
+                    st.warning(f'⚠️ Hay {len(venc)} cuenta(s) vencida(s) sin saldar.')
+            with der:
+                pend = sorted(cobrar + pagar, key=lambda t: (t['due_date'] is None, t['due_date'] or date.max))[:6]
+                st.markdown('**Próximos vencimientos**')
+                if pend:
+                    dfp = pd.DataFrame([{
+                        '': '⚠️' if _vencida(t) else '',
+                        'Tipo': 'Por cobrar' if t['type'] == 'SALE' else 'Por pagar',
+                        'Detalle': t['description'][:45],
+                        'Vence': t['due_date'].strftime('%d/%m') if t['due_date'] else '—',
+                        'Monto': _fmt_money(t['amount']),
+                    } for t in pend])
+                    st.dataframe(dfp, use_container_width=True, hide_index=True, height=min(260, len(dfp) * 36 + 42))
+                else:
+                    st.caption('No hay cuentas pendientes. 🎉')
+
+            st.markdown(f'**Ventas netas vs. gastos por mes · {anio}**')
+            largo = pd.DataFrame({'Mes': MESES * 2,
+                                  'Concepto': ['Ventas netas'] * 12 + ['Gastos'] * 12,
+                                  'Monto': col('ventas_netas') + col('gastos')})
+            grafico = alt.Chart(largo).mark_bar().encode(
+                x=alt.X('Mes:N', sort=MESES, axis=alt.Axis(labelAngle=0, title=None)),
+                xOffset='Concepto:N',
+                y=alt.Y('Monto:Q', title=None),
+                color=alt.Color('Concepto:N',
+                                scale=alt.Scale(domain=['Ventas netas', 'Gastos'], range=[C_VERDE, C_ROJO]),
+                                legend=alt.Legend(orient='bottom', title=None)),
+                tooltip=['Mes', 'Concepto', alt.Tooltip('Monto:Q', format=',.0f')],
+            ).properties(height=240)
+            st.altair_chart(grafico, use_container_width=True)
 
 
 # ==============================================================
@@ -1931,7 +2388,7 @@ SECCIONES = {
     'A': '⚡ Registradora exprés',
     'B': '📦 Inventario y costos',
     'C': '🧾 Historial de transacciones',
-    'D': '📊 Reportes financieros',
+    'D': '📊 Estados financieros',
 }
 RENDER_SECCION = {'A': _modulo_a, 'B': _modulo_b, 'C': _modulo_c, 'D': _modulo_d}
 NAV_KEY = 'pyme_seccion_activa'
@@ -2039,7 +2496,7 @@ def render_pyme(supabase, user_id, **kwargs):
 #     barcode varchar(50), name varchar(100) not null,
 #     current_stock int default 0, min_stock int default 5,
 #     unit_cost numeric(12,2) default 0, sale_price numeric(12,2) not null,
-#     mano_obra numeric(12,2) default 0,        -- ★ mano de obra por unidad (escandallo)
+#     mano_obra numeric(12,2) default 0,        -- ★ mano de obra por unidad (receta)
 #     margen numeric(5,2) default 40,           -- ★ margen deseado sobre precio
 #     created_at timestamp default now(),
 #     unique (user_id, barcode)
@@ -2057,13 +2514,16 @@ def render_pyme(supabase, user_id, **kwargs):
 #     quantity_required numeric(10,3) not null
 # );
 #
-# create type transaction_type as enum ('SALE','PURCHASE','EXPENSE','COLLECTION','PAYMENT');
+# create type transaction_type as enum (
+#     'SALE','PURCHASE','EXPENSE','COLLECTION','PAYMENT',
+#     'SALE_RETURN','PURCHASE_RETURN','INV_IN','INV_OUT','FIN_IN','FIN_OUT');   -- ★ tipos nuevos
 # create type transaction_status as enum ('PAID','PENDING');
 #
 # create table transactions (
 #     id serial primary key, user_id uuid not null,
 #     type transaction_type not null, description varchar(255),
 #     amount numeric(12,2) not null, cost_amount numeric(12,2) default 0,
+#     discount numeric(12,2) default 0,                       -- ★ descuento aplicado
 #     payment_method_id int references payment_methods(id),
 #     status transaction_status default 'PAID', due_date date,
 #     anulada boolean default false,                          -- ★ anulación lógica
