@@ -1093,7 +1093,309 @@ def _modulo_a():
         else:
             _form_liquidacion(False)
 
+# ==============================================================
+#  CALCULADORA DE PRECIOS (pasarelas, plataformas, impuestos, cuotas)
+#  Margen calculado sobre el PRECIO FINAL:
+#     precio = (costo + gastos fijos) / (1 − margen% − suma de % que se lleva el precio)
+# ==============================================================
 
+CUOTAS_OPC = [2, 3, 6, 12]
+REDONDEOS = ['Ninguno', 'Múltiplo', 'Psicológico (990/999)']
+
+
+def _cfg_default():
+    return {
+        'packaging': 100.0, 'envio': 200.0, 'comision': 5.0, 'iibb': 3.0, 'retenciones': 2.0,
+        'redondeo_tipo': REDONDEOS[2], 'redondeo_mult': 10.0,
+        'pasarelas': [{'name': 'Mercado Pago', 'pct': 7.0}, {'name': 'PayU', 'pct': 3.5},
+                      {'name': 'Stripe', 'pct': 2.9}],
+        'plataformas': [{'name': 'MercadoLibre', 'pct': 4.0}, {'name': 'Tienda Nube', 'pct': 3.0},
+                        {'name': 'Shopify', 'pct': 2.0}],
+        'cuotas': {2: [11.0, 7.0, 9.0], 3: [15.0, 12.0, 16.0], 6: [30.0, 27.0, 32.0], 12: [70.0, 60.0, 68.0]},
+        'margen_venta': 30.0, 'margen_mayorista': 15.0, 'descuento': 0.0,
+    }
+
+
+def _cfg_precios():
+    return st.session_state.setdefault(_key('precios_cfg'), _cfg_default())
+
+
+def _redondear(p, cfg):
+    tipo, m = cfg['redondeo_tipo'], max(float(cfg['redondeo_mult']), 1.0)
+    if tipo == 'Múltiplo':
+        return float(math.ceil(p / m) * m)
+    if tipo.startswith('Psicol'):
+        if p < 1000:
+            return float(math.ceil(p / m) * m)
+        return float(math.ceil((p + m) / 1000) * 1000 - m)   # 4.213 → 4.990 (múltiplo 10) o 4.999 (múltiplo 1)
+    return round(p, 2)
+
+
+def _sel_actual():
+    """Opciones tildadas hoy en la calculadora (con valores por defecto si no se dibujó)."""
+    g = st.session_state.get
+    return {'pack': g('pw_pc_pack', False), 'envio': g('pw_pc_envio', False),
+            'com': g('pw_pc_com', False), 'iibb': g('pw_pc_iibb', True), 'ret': g('pw_pc_ret', True),
+            'pasarela': g('pw_pc_pas', 0), 'plataforma': g('pw_pc_plat', 0), 'descuento': 0.0}
+
+
+def _calc_precio(costo, margen, cfg, sel, cuotas=1, pasarela=None):
+    """Devuelve el detalle del precio o None si los porcentajes no cierran (suman 100% o más)."""
+    pas = sel['pasarela'] if pasarela is None else pasarela
+    plat = sel['plataforma']
+    fijos_det = []
+    if sel['pack']:
+        fijos_det.append(('Packaging', cfg['packaging']))
+    if sel['envio']:
+        fijos_det.append(('Envío', cfg['envio']))
+    fijos = sum(v for _, v in fijos_det)
+    pcts = [
+        ('Comisión vendedor', cfg['comision'] if sel['com'] else 0.0),
+        ('Ingresos Brutos', cfg['iibb'] if sel['iibb'] else 0.0),
+        ('Retenciones', cfg['retenciones'] if sel['ret'] else 0.0),
+        (f"Pasarela ({cfg['pasarelas'][pas - 1]['name']})" if pas else 'Pasarela', cfg['pasarelas'][pas - 1]['pct'] if pas else 0.0),
+        ('Recargo por cuotas', cfg['cuotas'][cuotas][pas - 1] if (pas and cuotas > 1) else 0.0),
+        (f"Plataforma ({cfg['plataformas'][plat - 1]['name']})" if plat else 'Plataforma', cfg['plataformas'][plat - 1]['pct'] if plat else 0.0),
+    ]
+    den = 1 - (margen + sum(p for _, p in pcts)) / 100
+    if den <= 0.01:
+        return None
+    base = costo + fijos
+    desc = min(float(sel.get('descuento') or 0), 99.0)
+    lista = _redondear(base / den / (1 - desc / 100), cfg)
+    final = lista * (1 - desc / 100)
+    deducciones = [(n, final * p / 100, p) for n, p in pcts if p]
+    ganancia = final - base - sum(v for _, v, _ in deducciones)
+    return {'costo': costo, 'fijos_det': fijos_det, 'base': base, 'lista': lista, 'final': final,
+            'desc_pct': desc, 'desc_monto': lista - final, 'deducciones': deducciones,
+            'ganancia': ganancia, 'margen_real': ganancia / final * 100 if final else 0.0}
+
+
+def _bloque_calculadora_precios():
+    cfg = _cfg_precios()
+    productos = _s('productos')
+    with st.expander('💲 Calculadora de precios', expanded=True):
+        t_calc, t_cfg, t_des = st.tabs(['🧮 Calculadora', '⚙️ Configuración', '📋 Desglose'])
+
+        # ---------------- Pestaña 1: Calculadora ----------------
+        with t_calc:
+            izq, der = st.columns(2, gap='medium')
+            with izq:
+                st.markdown('**Producto**')
+                ids = [None] + [p['id'] for p in productos]
+                etiq = {None: '— Manual (sin producto) —', **{p['id']: p['name'] for p in productos}}
+                pid = st.selectbox('Producto', ids, format_func=etiq.get, key='pw_pc_prod')
+                p = _producto(pid) if pid else None
+                costo = st.number_input('Costo base $', min_value=0.0, step=10.0,
+                                        value=float(p['unit_cost']) if p else 0.0,
+                                        key=f"pw_pc_costo_{pid}_{p['unit_cost'] if p else 0}")
+
+                st.markdown('**Márgenes**')
+                m1, m2, m3 = st.columns(3)
+                with m1:
+                    mv = st.number_input('Margen venta %', min_value=0.0, max_value=95.0, step=1.0,
+                                         value=float(cfg['margen_venta']), key=f"pw_pc_mv_{cfg['margen_venta']}")
+                with m2:
+                    mm = st.number_input('Margen mayorista %', min_value=0.0, max_value=95.0, step=1.0,
+                                         value=float(cfg['margen_mayorista']), key=f"pw_pc_mm_{cfg['margen_mayorista']}")
+                with m3:
+                    desc = st.number_input('Descuento %', min_value=0.0, max_value=90.0, step=1.0,
+                                           value=float(cfg['descuento']), key=f"pw_pc_desc_{cfg['descuento']}")
+
+                st.markdown('**Gastos fijos por unidad**')
+                f1, f2 = st.columns(2)
+                with f1:
+                    st.checkbox(f"Packaging ({_fmt_money(cfg['packaging'])})", key='pw_pc_pack')
+                with f2:
+                    st.checkbox(f"Envío ({_fmt_money(cfg['envio'])})", key='pw_pc_envio')
+
+                st.markdown('**Impuestos y vendedor**')
+                i1, i2, i3 = st.columns(3)
+                with i1:
+                    st.checkbox(f"Comisión vend. ({cfg['comision']:g}%)", key='pw_pc_com')
+                with i2:
+                    st.checkbox(f"Ing. Brutos ({cfg['iibb']:g}%)", value=True, key='pw_pc_iibb')
+                with i3:
+                    st.checkbox(f"Retenciones ({cfg['retenciones']:g}%)", value=True, key='pw_pc_ret')
+
+            with der:
+                st.markdown('**Pasarela de pagos**')
+                st.radio('Pasarela', [0, 1, 2, 3], key='pw_pc_pas', label_visibility='collapsed',
+                         format_func=lambda i: 'Ninguna' if i == 0 else
+                         f"{cfg['pasarelas'][i - 1]['name']} · {cfg['pasarelas'][i - 1]['pct']:g}%")
+                st.markdown('**Plataforma**')
+                st.radio('Plataforma', [0, 1, 2, 3], key='pw_pc_plat', label_visibility='collapsed',
+                         format_func=lambda i: 'Ninguna' if i == 0 else
+                         f"{cfg['plataformas'][i - 1]['name']} · {cfg['plataformas'][i - 1]['pct']:g}%")
+
+            sel = _sel_actual()
+            sel['descuento'] = desc
+            r_min = _calc_precio(costo, mv, cfg, sel)
+            r_may = _calc_precio(costo, mm, cfg, sel)
+
+            st.divider()
+            if costo <= 0:
+                st.info('Elegí un producto o ingresá un costo base para calcular.')
+            elif r_min is None or r_may is None:
+                st.error('Los porcentajes (margen + comisiones + impuestos) suman 100% o más. Bajá el margen o sacá algún cargo.')
+            else:
+                sub_min = (f"Cliente paga {_fmt_money(r_min['final'])} con {desc:g}% off" if desc else 'Precio de lista')
+                _kpi_row([
+                    ('Precio minorista', _fmt_money(r_min['lista']), sub_min, C_VERDE),
+                    ('Precio mayorista', _fmt_money(r_may['lista']), f'Margen {mm:g}%', C_AZUL),
+                    ('Ganancia por unidad', _fmt_money(r_min['ganancia']), 'Minorista, neta de cargos', C_AMARILLO),
+                    ('Margen real', f"{r_min['margen_real']:.1f}%", 'Sobre lo que paga el cliente',
+                     C_VERDE if r_min['margen_real'] >= mv - 0.05 else C_NARANJA),
+                ])
+                if p is not None:
+                    b1, b2 = st.columns(2)
+                    with b1:
+                        if st.button(f"💲 Aplicar minorista a «{p['name']}»", key='pw_pc_aplicar',
+                                     use_container_width=True):
+                            p['sale_price'] = float(r_min['lista'])
+                            _flash(f"Precio de «{p['name']}» actualizado a {_fmt_money(r_min['lista'])}.")
+                            st.rerun()
+                    with b2:
+                        st.caption('El cálculo es en vivo: cambiás cualquier dato y se recalcula solo.')
+
+        # ---------------- Pestaña 2: Configuración ----------------
+        with t_cfg:
+            with st.form('pw_form_cfg_precios'):
+                c1, c2 = st.columns(2, gap='medium')
+                with c1:
+                    st.markdown('**Gastos operacionales**')
+                    a1, a2 = st.columns(2)
+                    with a1:
+                        packaging = st.number_input('Packaging $ / unidad', min_value=0.0, step=10.0,
+                                                    value=float(cfg['packaging']), key='pw_cfgp_pack')
+                    with a2:
+                        envio = st.number_input('Envío $ / unidad', min_value=0.0, step=10.0,
+                                                value=float(cfg['envio']), key='pw_cfgp_envio')
+                    st.markdown('**Comisión vendedor e impuestos**')
+                    b1, b2, b3 = st.columns(3)
+                    with b1:
+                        comision = st.number_input('Comisión %', min_value=0.0, max_value=100.0, step=0.5,
+                                                   value=float(cfg['comision']), key='pw_cfgp_com')
+                    with b2:
+                        iibb = st.number_input('Ingresos Brutos %', min_value=0.0, max_value=100.0, step=0.5,
+                                               value=float(cfg['iibb']), key='pw_cfgp_iibb')
+                    with b3:
+                        ret = st.number_input('Retenciones %', min_value=0.0, max_value=100.0, step=0.5,
+                                              value=float(cfg['retenciones']), key='pw_cfgp_ret')
+                    st.markdown('**Redondeo**')
+                    r1, r2 = st.columns(2)
+                    with r1:
+                        r_tipo = st.selectbox('Tipo', REDONDEOS, index=REDONDEOS.index(cfg['redondeo_tipo']),
+                                              key='pw_cfgp_rtipo')
+                    with r2:
+                        r_mult = st.number_input('Múltiplo $', min_value=1.0, step=1.0,
+                                                 value=float(cfg['redondeo_mult']), key='pw_cfgp_rmult')
+                    st.markdown('**Márgenes y descuento por defecto**')
+                    d1, d2, d3 = st.columns(3)
+                    with d1:
+                        n_mv = st.number_input('Margen venta %', min_value=0.0, max_value=95.0, step=1.0,
+                                               value=float(cfg['margen_venta']), key='pw_cfgp_mv')
+                    with d2:
+                        n_mm = st.number_input('Margen mayorista %', min_value=0.0, max_value=95.0, step=1.0,
+                                               value=float(cfg['margen_mayorista']), key='pw_cfgp_mm')
+                    with d3:
+                        n_desc = st.number_input('Descuento %', min_value=0.0, max_value=90.0, step=1.0,
+                                                 value=float(cfg['descuento']), key='pw_cfgp_desc')
+                with c2:
+                    st.markdown('**Pasarelas de pago**')
+                    pas_new = []
+                    for i, pz in enumerate(cfg['pasarelas']):
+                        n1, n2 = st.columns([3, 1])
+                        with n1:
+                            nm = st.text_input(f'Pasarela {i + 1}', value=pz['name'], key=f'pw_cfgp_pn{i}')
+                        with n2:
+                            pc = st.number_input('%', min_value=0.0, max_value=100.0, step=0.1,
+                                                 value=float(pz['pct']), key=f'pw_cfgp_pp{i}')
+                        pas_new.append({'name': nm.strip(), 'pct': float(pc)})
+                    st.markdown('**Plataformas**')
+                    plat_new = []
+                    for i, pz in enumerate(cfg['plataformas']):
+                        n1, n2 = st.columns([3, 1])
+                        with n1:
+                            nm = st.text_input(f'Plataforma {i + 1}', value=pz['name'], key=f'pw_cfgp_ln{i}')
+                        with n2:
+                            pc = st.number_input('%', min_value=0.0, max_value=100.0, step=0.1,
+                                                 value=float(pz['pct']), key=f'pw_cfgp_lp{i}')
+                        plat_new.append({'name': nm.strip(), 'pct': float(pc)})
+
+                st.markdown('**Recargos por cuotas, por pasarela (%)**')
+                df_c = pd.DataFrame(
+                    {pz['name']: [cfg['cuotas'][n][i] for n in CUOTAS_OPC] for i, pz in enumerate(cfg['pasarelas'])},
+                    index=[f'{n} cuotas %' for n in CUOTAS_OPC])
+                editado = st.data_editor(df_c, use_container_width=True, key='pw_cfgp_cuotas')
+                guardar = st.form_submit_button('💾 Guardar configuración', type='primary', use_container_width=True)
+
+            if guardar:
+                if any(not x['name'] for x in pas_new + plat_new):
+                    st.warning('Todas las pasarelas y plataformas necesitan un nombre.')
+                else:
+                    def _f(v):
+                        return float(v) if v == v else 0.0
+                    cfg.update({'packaging': float(packaging), 'envio': float(envio), 'comision': float(comision),
+                                'iibb': float(iibb), 'retenciones': float(ret), 'redondeo_tipo': r_tipo,
+                                'redondeo_mult': float(r_mult), 'margen_venta': float(n_mv),
+                                'margen_mayorista': float(n_mm), 'descuento': float(n_desc),
+                                'pasarelas': pas_new, 'plataformas': plat_new})
+                    for fila, n in enumerate(CUOTAS_OPC):
+                        cfg['cuotas'][n] = [_f(editado.iloc[fila, c]) for c in range(3)]
+                    _flash('Configuración de precios guardada.')
+                    st.rerun()
+
+            if st.button('🔁 Recalcular todos los productos', key='pw_cfgp_recalc', use_container_width=True):
+                sel_r, n_ok = _sel_actual(), 0
+                for pr in productos:
+                    if pr['unit_cost'] > 0:
+                        r = _calc_precio(pr['unit_cost'], cfg['margen_venta'], cfg, sel_r)
+                        if r:
+                            pr['sale_price'] = float(r['lista'])
+                            n_ok += 1
+                _flash(f'Se recalculó el precio de {n_ok} producto(s).')
+                st.rerun()
+            st.caption('«Recalcular todos» usa el margen de venta de arriba y las opciones tildadas hoy en la '
+                       'pestaña Calculadora (gastos, impuestos, pasarela, plataforma). Salta los productos sin costo.')
+
+        # ---------------- Pestaña 3: Desglose ----------------
+        with t_des:
+            if costo <= 0:
+                st.info('Primero elegí un producto o ingresá un costo en la pestaña Calculadora.')
+            else:
+                precio_de = st.radio('Desglosar precio', ['Minorista', 'Mayorista'], horizontal=True, key='pw_pc_des_tipo')
+                margen = mv if precio_de == 'Minorista' else mm
+                r = _calc_precio(costo, margen, cfg, sel)
+                if r is None:
+                    st.error('Los porcentajes suman 100% o más.')
+                else:
+                    html = _fila_html('Precio de lista', _fmt_money(r['lista']), '#e6edf3', fuerte=True)
+                    if r['desc_pct']:
+                        html += _fila_html(f"(−) Descuento {r['desc_pct']:g}%", _fmt_money(r['desc_monto']), C_ROJO, tenue=True)
+                        html += _fila_html('= Precio final al cliente', _fmt_money(r['final']), C_VERDE, fuerte=True, linea=True)
+                    html += _fila_html('(−) Costo base', _fmt_money(r['costo']), C_ROJO, tenue=True)
+                    for n, v in r['fijos_det']:
+                        html += _fila_html(f'(−) {n}', _fmt_money(v), C_ROJO, tenue=True)
+                    for n, v, pc in r['deducciones']:
+                        html += _fila_html(f'(−) {n} {pc:g}%', _fmt_money(v), C_ROJO, tenue=True)
+                    html += _fila_html('= Ganancia neta por unidad', _fmt_money(r['ganancia']),
+                                       C_VERDE if r['ganancia'] >= 0 else C_ROJO, fuerte=True, linea=True)
+                    html += _fila_html('Margen real', f"{r['margen_real']:.1f}%", C_GRIS, tenue=True)
+                    st.markdown(html, unsafe_allow_html=True)
+
+                    st.markdown('<div style="height:10px"></div>**Precio según cuotas y pasarela**',
+                                unsafe_allow_html=True)
+                    filas = []
+                    for n in [1] + CUOTAS_OPC:
+                        fila = {'Cuotas': '1 pago' if n == 1 else f'{n} cuotas'}
+                        for i, pz in enumerate(cfg['pasarelas'], 1):
+                            rr = _calc_precio(costo, margen, cfg, sel, n, pasarela=i)
+                            fila[pz['name']] = _fmt_money(rr['lista']) if rr else 'n/d'
+                        filas.append(fila)
+                    st.dataframe(pd.DataFrame(filas), use_container_width=True, hide_index=True)
+                    st.caption('Mantiene el margen elegido: el recargo de cada cuota se suma a los cargos que se lleva el precio.')
+                    
 # ==============================================================
 #  MÓDULO B — INVENTARIO + CALCULADORA DE COSTOS
 # ==============================================================
