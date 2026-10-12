@@ -4,6 +4,7 @@ streamlit-cookies-controller
 pandas
 openpyxl
 pdfplumber
+reportlab
 tzdata
 # Opcional: solo si querés poder importar archivos Excel viejos (.xls)
 # xlrd
