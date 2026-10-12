@@ -1772,7 +1772,20 @@ def _modulo_d():
                     st.markdown('<div style="height:10px"></div>**Ventas vs. gastos por día**', unsafe_allow_html=True)
                     df = pd.DataFrame({'Ventas': pd.Series(v_d, dtype=float),
                                        'Gastos': pd.Series(g_d, dtype=float)}).fillna(0).sort_index()
-                    st.bar_chart(df, height=220)
+                    df['Fecha'] = pd.to_datetime(df.index).strftime('%d/%m')
+                    orden = list(df['Fecha'])
+                    largo = df.melt(id_vars='Fecha', value_vars=['Ventas', 'Gastos'],
+                                    var_name='Concepto', value_name='Monto')
+                    grafico = alt.Chart(largo).mark_bar().encode(
+                        x=alt.X('Fecha:N', sort=orden, axis=alt.Axis(labelAngle=-45, title=None)),
+                        xOffset='Concepto:N',
+                        y=alt.Y('Monto:Q', title=None),
+                        color=alt.Color('Concepto:N',
+                                        scale=alt.Scale(domain=['Ventas', 'Gastos'], range=[C_VERDE, C_ROJO]),
+                                        legend=alt.Legend(orient='bottom', title=None)),
+                        tooltip=['Fecha', 'Concepto', alt.Tooltip('Monto:Q', format=',.0f')],
+                    ).properties(height=240)
+                    st.altair_chart(grafico, use_container_width=True)
 
         with der:
             st.markdown('**Flujo de Caja** (a hoy)')
