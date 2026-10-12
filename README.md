@@ -47,11 +47,25 @@ Aplicación web hecha con **Streamlit** y **Supabase** para que una PyME ordene 
    SUPABASE_URL = "https://xxxxxxxx.supabase.co"
    SUPABASE_KEY = "tu_anon_key"
    SUPABASE_SERVICE_KEY = "tu_service_role_key"
+
+   [pago_manual.cripto]
+   red = "USDT (TRC-20)"
+   wallet = "tu-direccion-de-wallet"
    ```
 5. Ejecutá la app:
    ```bash
    streamlit run app_pyme.py
    ```
+
+## 🧪 Modo simulación
+
+El módulo de gestión (`modulo_pyme.py`) funciona por ahora **sin base de datos**: todo vive en `st.session_state` y los datos de ejemplo se pierden al cerrar la sesión. Supabase se usa únicamente para el login, el trial y las suscripciones. El esquema SQL de referencia para conectar los datos más adelante está al final de `modulo_pyme.py`.
+
+## 🗄️ Tablas de Supabase necesarias
+
+- `perfiles` (con las columnas `modulos_plan`, `servicio_elegido`, `es_admin` y `habilitado`)
+- `solicitudes_pago` (con la columna `modulo`)
+- `solicitudes_reset` (para recuperar contraseña)
 
 ## ⚙️ Configuración
 
@@ -79,6 +93,7 @@ En `app_pyme.py`:
 
 - [Streamlit](https://streamlit.io) — interfaz web
 - [Supabase](https://supabase.com) — base de datos y autenticación
+- [pandas](https://pandas.pydata.org), openpyxl y pdfplumber — importación de CSV, Excel y PDF
 - [streamlit-cookies-controller](https://pypi.org/project/streamlit-cookies-controller/) — persistencia de sesión
 
 ## ⚠️ Aviso
