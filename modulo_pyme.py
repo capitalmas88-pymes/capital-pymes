@@ -1639,6 +1639,7 @@ def _modulo_b():
             _bloque_ajustes()
             _bloque_escandallo()
             _bloque_insumos()
+        _bloque_calculadora_precios()
 
 
 # ==============================================================
