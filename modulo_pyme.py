@@ -1347,63 +1347,61 @@ def _calc_precio(costo, margen, cfg, sel, cuotas=1, pasarela=None):
             'desc_pct': desc, 'desc_monto': lista - final, 'deducciones': deducciones,
             'ganancia': ganancia, 'margen_real': ganancia / final * 100 if final else 0.0}
 
-
 def _bloque_calculadora_precios():
     cfg = _cfg_precios()
     productos = _s('productos')
-    with st.expander('💲 Calculadora de precios', expanded=True):
+    with st.expander('💲 Calculadora de precios'):
         t_calc, t_des = st.tabs(['🧮 Calculadora', '📋 Desglose'])
 
         # ---------------- Pestaña 1: Calculadora ----------------
         with t_calc:
-            izq, der = st.columns(2, gap='medium')
-            with izq:
-                st.markdown('**Producto**')
-                ids = [None] + [p['id'] for p in productos]
-                etiq = {None: '— Manual (sin producto) —', **{p['id']: p['name'] for p in productos}}
-                pid = st.selectbox('Producto', ids, format_func=etiq.get, key='pw_pc_prod')
-                p = _producto(pid) if pid else None
-                costo = st.number_input('Costo base $', min_value=0.0, step=10.0,
-                                        value=float(p['unit_cost']) if p else 0.0,
-                                        key=f"pw_pc_costo_{pid}_{p['unit_cost'] if p else 0}")
+            st.markdown('**Producto**')
+            ids = [None] + [p['id'] for p in productos]
+            etiq = {None: '— Manual (sin producto) —', **{p['id']: p['name'] for p in productos}}
+            pid = st.selectbox('Producto', ids, format_func=etiq.get, key='pw_pc_prod')
+            p = _producto(pid) if pid else None
+            costo = st.number_input('Costo base $', min_value=0.0, step=10.0,
+                                    value=float(p['unit_cost']) if p else 0.0,
+                                    key=f"pw_pc_costo_{pid}_{p['unit_cost'] if p else 0}")
 
-                st.markdown('**Márgenes**')
-                m1, m2, m3 = st.columns(3)
-                with m1:
-                    mv = st.number_input('Margen venta %', min_value=0.0, max_value=95.0, step=1.0,
-                                         value=float(cfg['margen_venta']), key=f"pw_pc_mv_{cfg['margen_venta']}")
-                with m2:
-                    mm = st.number_input('Margen mayorista %', min_value=0.0, max_value=95.0, step=1.0,
-                                         value=float(cfg['margen_mayorista']), key=f"pw_pc_mm_{cfg['margen_mayorista']}")
-                with m3:
-                    desc = st.number_input('Descuento %', min_value=0.0, max_value=90.0, step=1.0,
-                                           value=float(cfg['descuento']), key=f"pw_pc_desc_{cfg['descuento']}")
+            st.markdown('**Márgenes**')
+            m1, m2, m3 = st.columns(3)
+            with m1:
+                mv = st.number_input('Margen venta %', min_value=0.0, max_value=95.0, step=1.0,
+                                     value=float(cfg['margen_venta']), key=f"pw_pc_mv_{cfg['margen_venta']}")
+            with m2:
+                mm = st.number_input('Margen mayorista %', min_value=0.0, max_value=95.0, step=1.0,
+                                     value=float(cfg['margen_mayorista']), key=f"pw_pc_mm_{cfg['margen_mayorista']}")
+            with m3:
+                desc = st.number_input('Descuento %', min_value=0.0, max_value=90.0, step=1.0,
+                                       value=float(cfg['descuento']), key=f"pw_pc_desc_{cfg['descuento']}")
 
-                st.markdown('**Gastos fijos por unidad**')
-                f1, f2 = st.columns(2)
-                with f1:
-                    st.checkbox(f"Packaging ({_fmt_money(cfg['packaging'])})", key='pw_pc_pack')
-                with f2:
-                    st.checkbox(f"Envío ({_fmt_money(cfg['envio'])})", key='pw_pc_envio')
+            st.markdown('**Gastos fijos por unidad**')
+            f1, f2 = st.columns(2)
+            with f1:
+                st.checkbox(f"Packaging ({_fmt_money(cfg['packaging'])})", key='pw_pc_pack')
+            with f2:
+                st.checkbox(f"Envío ({_fmt_money(cfg['envio'])})", key='pw_pc_envio')
 
-                st.markdown('**Impuestos y vendedor**')
-                i1, i2, i3 = st.columns(3)
-                with i1:
-                    st.checkbox(f"Comisión vend. ({cfg['comision']:g}%)", key='pw_pc_com')
-                with i2:
-                    st.checkbox(f"Ing. Brutos ({cfg['iibb']:g}%)", value=True, key='pw_pc_iibb')
-                with i3:
-                    st.checkbox(f"Retenciones ({cfg['retenciones']:g}%)", value=True, key='pw_pc_ret')
+            st.markdown('**Impuestos y vendedor**')
+            i1, i2, i3 = st.columns(3)
+            with i1:
+                st.checkbox(f"Comisión ({cfg['comision']:g}%)", key='pw_pc_com')
+            with i2:
+                st.checkbox(f"Ing. Brutos ({cfg['iibb']:g}%)", value=True, key='pw_pc_iibb')
+            with i3:
+                st.checkbox(f"Retenciones ({cfg['retenciones']:g}%)", value=True, key='pw_pc_ret')
 
-            with der:
-                st.markdown('**Pasarela de pagos**')
-                st.radio('Pasarela', [0, 1, 2, 3], key='pw_pc_pas', label_visibility='collapsed',
-                         format_func=lambda i: 'Ninguna' if i == 0 else
-                         f"{cfg['pasarelas'][i - 1]['name']} · {cfg['pasarelas'][i - 1]['pct']:g}%")
-                st.markdown('**Plataforma**')
-                st.radio('Plataforma', [0, 1, 2, 3], key='pw_pc_plat', label_visibility='collapsed',
-                         format_func=lambda i: 'Ninguna' if i == 0 else
-                         f"{cfg['plataformas'][i - 1]['name']} · {cfg['plataformas'][i - 1]['pct']:g}%")
+            st.markdown('**Pasarela y plataforma**')
+            s1, s2 = st.columns(2)
+            with s1:
+                st.selectbox('Pasarela de pagos', [0, 1, 2, 3], key='pw_pc_pas',
+                             format_func=lambda i: 'Ninguna' if i == 0 else
+                             f"{cfg['pasarelas'][i - 1]['name']} · {cfg['pasarelas'][i - 1]['pct']:g}%")
+            with s2:
+                st.selectbox('Plataforma', [0, 1, 2, 3], key='pw_pc_plat',
+                             format_func=lambda i: 'Ninguna' if i == 0 else
+                             f"{cfg['plataformas'][i - 1]['name']} · {cfg['plataformas'][i - 1]['pct']:g}%")
 
             sel = _sel_actual()
             sel['descuento'] = desc
@@ -1421,20 +1419,19 @@ def _bloque_calculadora_precios():
                 _kpi_row([
                     ('Precio minorista', _fmt_money(r_min['lista']), sub_min, C_VERDE),
                     ('Precio mayorista', _fmt_money(r_may['lista']), f'Margen {mm:g}%', C_AZUL),
+                ])
+                _kpi_row([
                     ('Ganancia por unidad', _fmt_money(r_min['ganancia']), 'Minorista, neta de cargos', C_AMARILLO),
                     ('Margen real', f"{r_min['margen_real']:.1f}%", 'Sobre lo que paga el cliente',
                      C_VERDE if r_min['margen_real'] >= mv - 0.05 else C_NARANJA),
                 ])
                 if p is not None:
-                    b1, b2 = st.columns(2)
-                    with b1:
-                        if st.button(f"💲 Aplicar minorista a «{p['name']}»", key='pw_pc_aplicar',
-                                     use_container_width=True):
-                            p['sale_price'] = float(r_min['lista'])
-                            _flash(f"Precio de «{p['name']}» actualizado a {_fmt_money(r_min['lista'])}.")
-                            st.rerun()
-                    with b2:
-                        st.caption('El cálculo es en vivo: cambiás cualquier dato y se recalcula solo.')
+                    if st.button(f"💲 Aplicar minorista a «{p['name']}»", key='pw_pc_aplicar',
+                                 use_container_width=True):
+                        p['sale_price'] = float(r_min['lista'])
+                        _flash(f"Precio de «{p['name']}» actualizado a {_fmt_money(r_min['lista'])}.")
+                        st.rerun()
+                st.caption('El cálculo es en vivo: cambiás cualquier dato y se recalcula solo.')
 
         # ---------------- Pestaña 2: Desglose ----------------
         with t_des:
@@ -1824,7 +1821,7 @@ def _modulo_b():
             _bloque_ajustes()
             _bloque_receta()
             _bloque_insumos()
-        _bloque_calculadora_precios()
+            _bloque_calculadora_precios()
 
 
 # ==============================================================
