@@ -2429,7 +2429,16 @@ def render_nav_pyme(columnas=None):
                 </style>
                 """, unsafe_allow_html=True)
 
-
+def render_config_pyme():
+    """Configuración completa del módulo PyMEs (negocio + calculadora de precios).
+    Se dibuja dentro del popover «Mi Cuenta» de app_pyme.py."""
+    _init_sim()   # el popover se dibuja antes que render_pyme()
+    t_neg, t_pre = st.tabs(['🏢 Negocio y medios de pago', '💲 Calculadora de precios'])
+    with t_neg:
+        _bloque_config()
+    with t_pre:
+        _bloque_config_precios()
+        
 # ==============================================================
 #  ENTRY POINT
 # ==============================================================
