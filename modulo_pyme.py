@@ -1407,6 +1407,7 @@ def _bloque_calculadora_precios():
 
             sel = _sel_actual()
             sel['descuento'] = desc
+            st.session_state[_key('sel_calc')] = dict(sel)
             r_min = _calc_precio(costo, mv, cfg, sel)
             r_may = _calc_precio(costo, mm, cfg, sel)
 
