@@ -2486,7 +2486,6 @@ def render_pyme(supabase, user_id, **kwargs):
         activa = 'A'
     RENDER_SECCION[activa]()
 
-    _bloque_config()
     _inyectar_extras()
 
 
