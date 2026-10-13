@@ -3,7 +3,7 @@
 #
 #  Archivos que necesita en el mismo repo:
 #     app_pyme.py            (este archivo — es el "Main file" del deploy)
-#     modulo_pyme.py         (tu módulo, sin cambios)
+#     modulo_pyme.py         (con render_config_pyme agregado)
 #     modulo_pago_manual.py  (paywall / suscripción — el que ya tenés)
 #     modulo_landing.py      (solo se reutiliza buscar_uid_por_email y la
 #                             recuperación de contraseña)
@@ -22,7 +22,7 @@ import streamlit as st
 from supabase import create_client
 from streamlit_cookies_controller import CookieController
 
-from modulo_pyme import render_pyme, render_nav_pyme, get_nombre_negocio
+from modulo_pyme import render_pyme, render_nav_pyme, get_nombre_negocio, render_config_pyme
 from modulo_landing import _render_recuperar_contrasena
 from modulo_pago_manual import pantalla_suscripcion_modulo, es_admin_usuario
 
@@ -79,6 +79,9 @@ st.markdown("""
     background:#0d1117 !important; color:var(--verde-monster) !important;
     font-weight:600 !important; font-size:12.5px !important; width:100% !important;
   }
+
+  /* Popover de Mi Cuenta más ancho (configuración del negocio) */
+  div[data-testid="stPopoverBody"] { min-width:min(820px, 92vw) !important; max-height:80vh; overflow-y:auto; }
 
   /* KPI cards y títulos (los usa modulo_pyme) */
   .kpi-card { background:#0d1117; border:1px solid #21262d; border-radius:10px;
@@ -303,8 +306,12 @@ with st.container(key='nav_pills_wrap'):
                     f'<div style="font-size:11px;color:#6b7d9a;padding:2px 4px 8px 4px">{EMAIL}</div>',
                     unsafe_allow_html=True,
                 )
-                if st.button("🚪 Cerrar sesión", use_container_width=True, key="btn_logout"):
-                    cerrar_sesion()
+                st.markdown('**⚙️ Configuración del negocio**')
+                render_config_pyme()
+                st.divider()
+                if not MODO_DEMO:
+                    if st.button("🚪 Cerrar sesión", use_container_width=True, key="btn_logout"):
+                        cerrar_sesion()
 
 st.markdown('<div style="height:6px"></div>', unsafe_allow_html=True)
 
