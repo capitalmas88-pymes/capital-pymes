@@ -453,7 +453,56 @@ def _anular(tx_id):
     t['anulada'] = True
     return True, f"Operación #{tx_id} anulada. El stock y la caja se ajustaron."
 
+IVA_OPC = [0.0, 10.5, 21.0, 27.0]
 
+
+def _calc_iva(base, pct, incluido):
+    """(total, iva). Si 'incluido', el importe ya trae el IVA adentro; si no, se suma."""
+    base, pct = float(base), float(pct or 0)
+    if pct <= 0:
+        return round(base, 2), 0.0
+    if incluido:
+        return round(base, 2), round(base - base / (1 + pct / 100), 2)
+    iva = base * pct / 100
+    return round(base + iva, 2), round(iva, 2)
+
+
+def _desc_iva(pct, iva, incluido):
+    if not iva:
+        return ''
+    return f' · IVA {float(pct):g}% {_fmt_money(iva)}' + (' incl.' if incluido else '')
+
+
+def _iva_widgets(prefix):
+    """Selector de IVA para usar dentro de un st.form. Devuelve (pct, incluido)."""
+    c1, c2 = st.columns(2)
+    with c1:
+        pct = st.selectbox('IVA', IVA_OPC, key=f'{prefix}_iva',
+                           format_func=lambda v: 'Sin IVA' if v == 0 else f'{v:g}%')
+    with c2:
+        modo = st.radio('El importe…', ['No incluye IVA', 'Ya incluye IVA'], horizontal=True,
+                        key=f'{prefix}_iva_modo')
+    return pct, modo == 'Ya incluye IVA'
+
+
+def _buscar_insumo(nombre):
+    n = (nombre or '').strip().lower()
+    return next((i for i in _s('insumos') if i['name'].strip().lower() == n), None)
+
+
+def _iva_resumen(desde, hasta):
+    """(IVA débito de ventas, IVA crédito de compras y gastos)."""
+    deb = cred = 0.0
+    for t in _s('transacciones'):
+        if t['anulada'] or not _en_periodo(t, desde, hasta):
+            continue
+        iva = t.get('iva', 0.0)
+        if t['type'] == 'SALE':
+            deb += iva
+        elif t['type'] in ('PURCHASE', 'EXPENSE'):
+            cred += iva
+    return deb, cred
+    
 # ==============================================================
 #  CÁLCULOS: caja, cuentas, resultados
 # ==============================================================
