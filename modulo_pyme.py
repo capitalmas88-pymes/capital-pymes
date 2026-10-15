@@ -603,9 +603,9 @@ def _pyl_detalle(desde, hasta):
     for t in _s('transacciones'):
         if t['anulada'] or not _en_periodo(t, desde, hasta):
             continue
-        tp, dto = t['type'], t.get('discount', 0.0)
+        tp, dto, iva = t['type'], t.get('discount', 0.0), t.get('iva', 0.0)
         if tp == 'SALE':
-            d['ventas'] += t['amount'] + dto      # ventas a precio de lista
+            d['ventas'] += t['amount'] - iva + dto      # ventas netas de IVA, a precio de lista   # ventas a precio de lista
             d['desc'] += dto
             d['cogs'] += t['cost_amount']
         elif tp == 'SALE_RETURN':
@@ -616,7 +616,7 @@ def _pyl_detalle(desde, hasta):
         elif tp == 'PURCHASE_RETURN':
             d['dev_compras'] += t['amount']
         elif tp == 'EXPENSE':
-            d['gastos'] += t['amount']
+            d['gastos'] += t['amount'] - iva
     d['ventas_netas'] = d['ventas'] - d['devol'] - d['desc']
     d['bruta'] = d['ventas_netas'] - d['cogs'] + d['dev_compras'] + d['desc_compras']
     d['neta'] = d['bruta'] - d['gastos']
