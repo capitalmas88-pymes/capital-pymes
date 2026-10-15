@@ -897,13 +897,15 @@ def _venta_ticket():
         with c4:
             vence = st.date_input('Vence (si queda pendiente)', value=date.today() + timedelta(days=15), key='pw_v_vence')
         descuento = st.number_input('Descuento %', min_value=0.0, max_value=100.0, step=1.0, key='pw_v_desc')
+        iva_pct, iva_inc = _iva_widgets('pw_v')
         enviar = st.form_submit_button(
             f'✅ Confirmar venta · {_fmt_money(total)}' if carrito else '✅ Confirmar venta',
             type='primary', use_container_width=True, disabled=not carrito)
 
     if enviar:
         ok, msg = _reg_venta(dict(carrito), medio, 'PAID' if estado == 'Pagado' else 'PENDING', vence,
-                             nota.strip(), descuento_pct=descuento)
+                             nota.strip(), descuento_pct=descuento,
+                             iva_pct=iva_pct, iva_incluido=iva_inc)
         if ok:
             st.session_state[_key('carrito')] = {}
             if _tipo_medio(medio) == 'credito' or estado == 'Pendiente':
@@ -1229,7 +1231,6 @@ def _form_compra():
 
     _importador('compra')
 
-
 def _form_gasto():
     categorias = CATEGORIAS_GASTO
     with st.form('pw_form_gasto', clear_on_submit=True):
@@ -1239,6 +1240,7 @@ def _form_gasto():
         with c2:
             monto = st.number_input('Monto', min_value=0.0, step=100.0, key='pw_g_monto')
         descripcion = st.text_input('Descripción', key='pw_g_desc', placeholder='Ej: Factura de luz')
+        iva_pct, iva_inc = _iva_widgets('pw_g')
         c3, c4, c5 = st.columns(3)
         with c3:
             medio = st.selectbox('Medio de pago', _medios_activos(), key='pw_g_medio')
@@ -1247,13 +1249,15 @@ def _form_gasto():
         with c5:
             vence = st.date_input('Vence (si queda pendiente)', value=date.today() + timedelta(days=15), key='pw_g_vence')
         enviar = st.form_submit_button('💸 Registrar gasto', type='primary', use_container_width=True)
+    st.caption('El IVA se descuenta del gasto en el Estado de Resultados (va al recaudador), pero sí sale de la caja.')
 
     if enviar:
         if monto <= 0:
             st.warning('El monto debe ser mayor a 0.')
         else:
             ok, msg = _reg_gasto(categoria, descripcion.strip(), float(monto), medio,
-                                 'PAID' if estado == 'Pagado' else 'PENDING', vence)
+                                 'PAID' if estado == 'Pagado' else 'PENDING', vence,
+                                 iva_pct=iva_pct, iva_incluido=iva_inc)
             _flash(msg)
             st.rerun()
 
