@@ -432,6 +432,11 @@ def _anular(tx_id):
                 p['current_stock'] += it['quantity']
     elif t['type'] == 'PURCHASE':
         for it in t['items']:
+            if it.get('insumo_id'):
+                ins = _insumo(it['insumo_id'])
+                if ins:
+                    ins['stock'] = max(0.0, round(float(ins.get('stock', 0)) - it['quantity'], 3))
+                continue
             p = _producto(it['product_id'])
             if p:
                 p['current_stock'] = max(0, p['current_stock'] - it['quantity'])
