@@ -236,14 +236,14 @@ def _crear_producto(nombre, precio=0.0, costo=0.0, barcode='', minimo=5):
 # ==============================================================
 
 def _nueva_tx(tipo, descripcion, monto, medio, estado, vence=None, costo=0.0,
-              items=None, cuando=None, liquida_a=None, discount=0.0):
+              items=None, cuando=None, liquida_a=None, discount=0.0, iva=0.0):
     tx = {
         'id': _siguiente_id('transacciones'), 'type': tipo, 'description': descripcion,
         'amount': float(monto), 'cost_amount': float(costo), 'payment_method': medio,
         'status': estado, 'due_date': vence if estado == 'PENDING' else None,
         'created_at': cuando or datetime.now(), 'items': items or [],
         'anulada': False, 'liquidado_por': None, 'liquida_a': liquida_a,
-        'discount': float(discount),
+        'discount': float(discount), 'iva': float(iva),
     }
     _s('transacciones').append(tx)
     return tx
@@ -254,7 +254,8 @@ def _estado_efectivo(medio, estado):
     return 'PENDING' if _tipo_medio(medio) == 'credito' else estado
 
 
-def _reg_venta(carrito, medio, estado, vence, nota='', cuando=None, descuento_pct=0.0):
+def _reg_venta(carrito, medio, estado, vence, nota='', cuando=None, descuento_pct=0.0,
+               iva_pct=0.0, iva_incluido=False):
     if not carrito:
         return False, 'El ticket está vacío.'
     for pid, qty in carrito.items():
@@ -272,14 +273,17 @@ def _reg_venta(carrito, medio, estado, vence, nota='', cuando=None, descuento_pc
         costo += qty * p['unit_cost']
         p['current_stock'] -= int(qty)
     descuento = round(bruto * min(max(float(descuento_pct or 0), 0.0), 100.0) / 100, 2)
+    total, iva = _calc_iva(bruto - descuento, iva_pct, iva_incluido)
     desc = ', '.join(f"{i['quantity']}× {i['name']}" for i in items)
     if descuento:
         desc += f' (desc. {float(descuento_pct):g}%)'
+    desc += _desc_iva(iva_pct, iva, iva_incluido)
     if nota:
         desc += f' — {nota}'
     estado = _estado_efectivo(medio, estado)
-    _nueva_tx('SALE', desc, bruto - descuento, medio, estado, vence, costo, items, cuando, discount=descuento)
-    return True, f'Venta registrada por {_fmt_money(bruto - descuento)}.'
+    _nueva_tx('SALE', desc, total, medio, estado, vence, costo, items, cuando,
+              discount=descuento, iva=iva)
+    return True, f'Venta registrada por {_fmt_money(total)}.'
 
 
 def _reg_compra(pid, cantidad, costo_unit, medio, estado, vence, cuando=None):
@@ -301,43 +305,73 @@ def _reg_compra(pid, cantidad, costo_unit, medio, estado, vence, cuando=None):
     return True, f'Compra registrada por {_fmt_money(cantidad * costo_unit)}.'
 
 
-def _reg_compra_multiple(lineas, medio, estado, vence, nota='', cuando=None, descuento_pct=0.0):
-    """Una sola transacción PURCHASE con varios productos.
-    Cada línea: {'pid': id o None, 'nombre', 'qty', 'costo', 'precio', 'barcode', 'minimo'}.
-    Si pid es None, crea el producto nuevo recién acá (al confirmar)."""
+def _reg_compra_multiple(lineas, medio, estado, vence, nota='', cuando=None, descuento_pct=0.0,
+                         iva_pct=0.0, iva_incluido=False):
+    """Una sola transacción PURCHASE con productos y/o insumos.
+    Línea de producto: {'pid': id o None, 'nombre', 'qty', 'costo', 'precio', 'barcode', 'minimo'}.
+    Línea de insumo:   {'tipo': 'insumo', 'iid': id o None, 'nombre', 'unidad', 'qty', 'costo'}.
+    Lo nuevo (producto o insumo) se crea recién acá, al confirmar.
+    Si el importe ya incluye IVA, el costo que se guarda es neto de IVA."""
     if not lineas:
         return False, 'El detalle de la compra está vacío.'
+    factor = 1 / (1 + float(iva_pct) / 100) if (iva_incluido and iva_pct) else 1.0
     items, total = [], 0.0
     for l in lineas:
+        if l.get('tipo') == 'insumo':
+            ins = _insumo(l['iid']) if l.get('iid') else _buscar_insumo(l['nombre'])
+            if ins is None:
+                ins = {'id': _siguiente_id('insumos'), 'name': l['nombre'].strip(), 'cost_per_unit': 0.0,
+                       'unit_measure': l.get('unidad', 'kg'), 'stock': 0.0}
+                _s('insumos').append(ins)
+            qty, costo = float(l['qty']), float(l['costo'])
+            ins['cost_per_unit'] = round(costo * factor, 2)          # último costo de compra
+            ins['stock'] = round(float(ins.get('stock', 0)) + qty, 3)
+            for pr in _s('productos'):                                # recalcula recetas que lo usan
+                if any(r['insumo_id'] == ins['id'] for r in pr['receta']):
+                    _recalcular_costo(pr)
+            items.append({'product_id': None, 'insumo_id': ins['id'], 'name': ins['name'],
+                          'quantity': qty, 'unit_price': 0.0, 'unit_cost': round(costo * factor, 2)})
+            total += qty * costo
+            continue
+
         p = _producto(l['pid']) if l.get('pid') else None
         if p is None:
-            p = _crear_producto(l['nombre'], l.get('precio', 0), l['costo'],
+            p = _crear_producto(l['nombre'], l.get('precio', 0), float(l['costo']) * factor,
                                 l.get('barcode', ''), l.get('minimo', 5))
         qty, costo = int(l['qty']), float(l['costo'])
+        costo_n = costo * factor
         stock_prev = p['current_stock']
         if not p.get('receta') and not p.get('mano_obra'):
             total_u = stock_prev + qty
-            p['unit_cost'] = round((stock_prev * p['unit_cost'] + qty * costo) / total_u, 2) if total_u else costo
+            p['unit_cost'] = round((stock_prev * p['unit_cost'] + qty * costo_n) / total_u, 2) if total_u else round(costo_n, 2)
         p['current_stock'] = stock_prev + qty
         items.append({'product_id': p['id'], 'name': p['name'], 'quantity': qty,
-                      'unit_price': 0.0, 'unit_cost': costo})
+                      'unit_price': 0.0, 'unit_cost': round(costo_n, 2)})
         total += qty * costo
+
     descuento = round(total * min(max(float(descuento_pct or 0), 0.0), 100.0) / 100, 2)
-    desc = ', '.join(f"{i['quantity']}× {i['name']}" for i in items) + ' (compra)'
+    importe, iva = _calc_iva(total - descuento, iva_pct, iva_incluido)
+    desc = ', '.join(f"{i['quantity']:g}× {i['name']}" for i in items) + ' (compra)'
     if descuento:
         desc += f' (desc. {float(descuento_pct):g}%)'
+    desc += _desc_iva(iva_pct, iva, iva_incluido)
     if nota:
         desc += f' — {nota}'
     estado = _estado_efectivo(medio, estado)
-    _nueva_tx('PURCHASE', desc, total - descuento, medio, estado, vence, 0.0, items, cuando, discount=descuento)
-    return True, f'Compra registrada por {_fmt_money(total - descuento)} ({len(items)} producto(s)).'
+    # el descuento se guarda neto de IVA para que el Estado de Resultados no lo arrastre
+    _nueva_tx('PURCHASE', desc, importe, medio, estado, vence, 0.0, items, cuando,
+              discount=round(descuento * factor, 2), iva=iva)
+    return True, f'Compra registrada por {_fmt_money(importe)} ({len(items)} ítem(s)).'
 
 
-def _reg_gasto(categoria, descripcion, monto, medio, estado, vence, cuando=None):
+def _reg_gasto(categoria, descripcion, monto, medio, estado, vence, cuando=None,
+               iva_pct=0.0, iva_incluido=False):
+    total, iva = _calc_iva(monto, iva_pct, iva_incluido)
     desc = f'{categoria}: {descripcion}' if descripcion else categoria
+    desc += _desc_iva(iva_pct, iva, iva_incluido)
     estado = _estado_efectivo(medio, estado)
-    _nueva_tx('EXPENSE', desc, monto, medio, estado, vence, 0.0, None, cuando)
-    return True, f'Gasto registrado por {_fmt_money(monto)}.'
+    _nueva_tx('EXPENSE', desc, total, medio, estado, vence, 0.0, None, cuando, iva=iva)
+    return True, f'Gasto registrado por {_fmt_money(total)}.'
 
 
 def _reg_devolucion(tipo, pid, qty, unit, medio, nota='', cuando=None):
