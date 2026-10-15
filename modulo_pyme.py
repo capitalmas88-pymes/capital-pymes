@@ -1118,14 +1118,9 @@ def _importador(tipo):
 
 # ---------- Compras (varios productos por operación) ----------
 
-def _form_compra():
-    productos = _s('productos')
-    lineas = _compra_lineas()
+def _compra_agregar_producto(productos, lineas):
     NUEVO = '➕ Producto nuevo…'
     opciones = {f"{p['name']} (stock {p['current_stock']})": p['id'] for p in productos}
-
-    # ---------- 1) Agregar productos al detalle ----------
-    _titulo('➕ Agregar producto al detalle')
     sel = st.selectbox('Producto', [NUEVO] + list(opciones), index=1 if opciones else 0, key='pw_c_prod')
     es_nuevo = sel == NUEVO
     p = None if es_nuevo else _producto(opciones[sel])
@@ -1163,7 +1158,6 @@ def _form_compra():
             if not nombre:
                 st.warning('Escribí el nombre del producto nuevo.')
             elif existente:
-                # ya existe con ese nombre: se usa el existente
                 lineas.append({'pid': existente['id'], 'nombre': existente['name'],
                                'qty': int(cantidad), 'costo': float(costo)})
                 st.rerun()
@@ -1177,28 +1171,93 @@ def _form_compra():
             lineas.append({'pid': pid, 'nombre': p['name'], 'qty': int(cantidad), 'costo': float(costo)})
             st.rerun()
 
+
+def _compra_agregar_insumo(insumos, lineas):
+    etiq = {i['id']: f"{i['name']} ({i['unit_measure']}) · stock {float(i.get('stock', 0)):g}" for i in insumos}
+    sel = st.selectbox('Insumo', [None] + list(etiq), index=1 if insumos else 0, key='pw_c_ins',
+                       format_func=lambda v: '➕ Insumo nuevo…' if v is None else etiq[v])
+    es_nuevo = sel is None
+    ins = None if es_nuevo else _insumo(sel)
+
+    with st.form('pw_form_compra_insumo', clear_on_submit=True):
+        nombre_nuevo, unidad_nueva = '', 'kg'
+        if es_nuevo:
+            n1, n2 = st.columns([3, 2])
+            with n1:
+                nombre_nuevo = st.text_input('Nombre del insumo nuevo', key='pw_c_ins_nombre')
+            with n2:
+                unidad_nueva = st.selectbox('Unidad', ['kg', 'gr', 'lt', 'ml', 'unidad'], key='pw_c_ins_unidad')
+        c1, c2 = st.columns(2)
+        with c1:
+            cantidad = st.number_input(f"Cantidad ({ins['unit_measure']})" if ins else 'Cantidad',
+                                       min_value=0.0, step=0.5, format='%.3f', key='pw_c_ins_qty')
+        with c2:
+            costo = st.number_input('Costo por unidad de medida', min_value=0.0, step=50.0,
+                                    value=float(ins['cost_per_unit']) if ins else 0.0,
+                                    key=f'pw_c_ins_costo_{sel}')
+        agregar = st.form_submit_button('➕ Agregar insumo al detalle', use_container_width=True)
+
+    if agregar:
+        nombre = nombre_nuevo.strip()
+        if es_nuevo and not nombre:
+            st.warning('Escribí el nombre del insumo nuevo.')
+        elif cantidad <= 0:
+            st.warning('La cantidad debe ser mayor a 0.')
+        else:
+            if es_nuevo:
+                existente = _buscar_insumo(nombre)
+                ins_l = existente
+                unidad = existente['unit_measure'] if existente else unidad_nueva
+            else:
+                ins_l, unidad = ins, ins['unit_measure']
+            lineas.append({'tipo': 'insumo', 'iid': ins_l['id'] if ins_l else None,
+                           'nombre': ins_l['name'] if ins_l else nombre, 'unidad': unidad,
+                           'qty': float(cantidad), 'costo': float(costo)})
+            st.rerun()
+
+
+def _form_compra():
+    productos = _s('productos')
+    insumos = _s('insumos')
+    lineas = _compra_lineas()
+
+    # ---------- 1) Agregar al detalle ----------
+    _titulo('➕ Agregar al detalle')
+    que = st.radio('Qué compraste', ['📦 Producto', '🥣 Insumo'], horizontal=True, key='pw_c_que',
+                   label_visibility='collapsed')
+    if que == '📦 Producto':
+        _compra_agregar_producto(productos, lineas)
+    else:
+        _compra_agregar_insumo(insumos, lineas)
+
     # ---------- 2) Detalle de la compra ----------
     _titulo('🧾 Detalle de la compra')
     total = 0.0
     if not lineas:
-        st.caption('Todavía no agregaste productos. Podés sumar todos los que quieras antes de confirmar.')
+        st.caption('Todavía no agregaste nada. Podés sumar productos e insumos antes de confirmar.')
     for i, l in enumerate(lineas):
         sub = l['qty'] * l['costo']
         total += sub
+        es_ins = l.get('tipo') == 'insumo'
+        nuevo = (not l.get('iid')) if es_ins else (l.get('pid') is None)
         d1, d2 = st.columns([8, 1])
         with d1:
-            tag = (f" <span style='color:{C_AMARILLO};font-size:11px;font-weight:700'>NUEVO</span>"
-                   if l['pid'] is None else '')
-            st.markdown(f"**{l['qty']}×** {_esc(l['nombre'])}{tag} "
-                        f"<span style='color:{C_GRIS};float:right'>{_fmt_money(sub)}</span>",
-                        unsafe_allow_html=True)
+            tag = (f" <span style='color:{C_AMARILLO};font-size:11px;font-weight:700'>NUEVO</span>" if nuevo else '')
+            if es_ins:
+                st.markdown(f"🥣 **{l['qty']:g} {_esc(l['unidad'])}** de {_esc(l['nombre'])}{tag} "
+                            f"<span style='color:{C_GRIS};float:right'>{_fmt_money(sub)}</span>",
+                            unsafe_allow_html=True)
+            else:
+                st.markdown(f"**{l['qty']}×** {_esc(l['nombre'])}{tag} "
+                            f"<span style='color:{C_GRIS};float:right'>{_fmt_money(sub)}</span>",
+                            unsafe_allow_html=True)
         with d2:
             st.button('✕', key=f'pw_cx_{i}', on_click=_compra_quitar, args=(i,))
     if lineas:
         st.markdown(
             f'<div style="display:flex;justify-content:space-between;align-items:center;'
             f'border-top:1px solid #21262d;margin-top:6px;padding-top:8px">'
-            f'<span style="color:{C_GRIS};font-size:12px;text-transform:uppercase;letter-spacing:.6px">Total</span>'
+            f'<span style="color:{C_GRIS};font-size:12px;text-transform:uppercase;letter-spacing:.6px">Subtotal</span>'
             f'<span style="font-size:26px;font-weight:800;color:#e6edf3">{_fmt_money(total)}</span></div>',
             unsafe_allow_html=True)
         st.button('🗑️ Vaciar detalle', key='pw_c_vaciar', on_click=_compra_vaciar)
@@ -1215,15 +1274,18 @@ def _form_compra():
         nota = st.text_input('Proveedor / nota (opcional)', key='pw_c_nota')
         descuento = st.number_input('Descuento del proveedor %', min_value=0.0, max_value=100.0, step=1.0,
                                     key='pw_c_desc')
+        iva_pct, iva_inc = _iva_widgets('pw_c')
         enviar = st.form_submit_button(
-            f'📥 Registrar compra · {_fmt_money(total)}' if lineas else '📥 Registrar compra',
+            f'📥 Registrar compra · subtotal {_fmt_money(total)}' if lineas else '📥 Registrar compra',
             type='primary', use_container_width=True, disabled=not lineas)
-    st.caption('Suma stock de cada producto y recalcula su costo (promedio ponderado). '
-               'Los productos nuevos se crean al confirmar.')
+    st.caption('Suma stock de productos (costo promedio ponderado) y de insumos (el costo queda como el de la última compra, '
+               'y se recalculan las recetas que lo usan). Lo nuevo se crea al confirmar. '
+               'Con IVA incluido, el costo se guarda sin IVA.')
 
     if enviar:
         ok, msg = _reg_compra_multiple(list(lineas), medio, 'PAID' if estado == 'Pagado' else 'PENDING',
-                                       vence, nota.strip(), descuento_pct=descuento)
+                                       vence, nota.strip(), descuento_pct=descuento,
+                                       iva_pct=iva_pct, iva_incluido=iva_inc)
         if ok:
             _compra_vaciar()
         _flash(msg, 'success' if ok else 'warning')
