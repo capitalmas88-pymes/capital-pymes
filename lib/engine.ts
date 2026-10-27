@@ -4,7 +4,7 @@ export type Prod = { id: number; name: string; stock: number; min: number; cost:
 export type Medio = { name: string; tipo: 'caja' | 'banco' | 'credito' };
 export type Item = { pid: number; name: string; qty: number; price: number; cost: number };
 export type Tx = { id: number; type: Tipo; desc: string; amount: number; costAmt: number; medio: string; status: St;
-  due?: string; at: string; items: Item[]; void: boolean; paidBy?: number; pays?: number; disc: number };
+  due?: string; at: string; items: Item[]; void: boolean; paidBy?: number; pays?: number; disc: number; iva?: number; prov?: string };
 export type S = { prods: Prod[]; txs: Tx[]; medios: Medio[]; caja0: number; banco0: number; seq: number };
 
 export const money = (v: number) => (v < 0 ? '-' : '') + '$' + Math.abs(Math.round(v)).toLocaleString('es-AR');
@@ -17,8 +17,19 @@ function push(s: S, t: Omit<Tx, 'id' | 'void'>, due?: string) {
   s.txs.push(x); return x;
 }
 
+export type Ln = { pid: number; qty: number; cost: number };
+export type GLn = { cat: string; desc: string; monto: number };
+export function calcIva(base: number, pct: number, inc: boolean) {
+  const r = (x: number) => Math.round(x * 100) / 100;
+  if (pct <= 0) return { total: r(base), iva: 0 };
+  if (inc) return { total: r(base), iva: r(base - base / (1 + pct / 100)) };
+  const iva = r(base * pct / 100); return { total: r(base + iva), iva };
+}
+const sfx = (pct: number, iva: number, inc: boolean, prov: string) =>
+  (iva ? ` · IVA ${pct}% ${money(iva)}${inc ? ' incl.' : ''}` : '') + (prov ? ` · Prov. ${prov}` : '');
+
 export function venta(s: S, cart: Record<number, number>, medio: string, st: St, due: string | undefined,
-  nota = '', pct = 0, at = now()): string | null {
+  nota = '', pct = 0, at = now(), ivaPct = 0, ivaInc = false): string | null {
   const ids = Object.keys(cart).map(Number);
   if (!ids.length) return 'El ticket está vacío.';
   for (const id of ids) {
@@ -33,26 +44,39 @@ export function venta(s: S, cart: Record<number, number>, medio: string, st: St,
     bruto += q * p.price; costo += q * p.cost; p.stock -= q;
   }
   const disc = Math.round(bruto * Math.min(Math.max(pct, 0), 100)) / 100;
-  push(s, { type: 'SALE', desc: items.map(i => `${i.qty}× ${i.name}`).join(', ') + (disc ? ` (desc. ${pct}%)` : '') + (nota ? ` — ${nota}` : ''),
-    amount: bruto - disc, costAmt: costo, medio, status: st, at, items, disc }, due);
+  const { total, iva } = calcIva(bruto - disc, ivaPct, ivaInc);
+  push(s, { type: 'SALE', desc: items.map(i => `${i.qty}× ${i.name}`).join(', ') + (disc ? ` (desc. ${pct}%)` : '') + sfx(ivaPct, iva, ivaInc, '') + (nota ? ` — ${nota}` : ''),
+    amount: total, costAmt: costo, medio, status: st, at, items, disc, iva }, due);
   return null;
 }
 
-export function compra(s: S, pid: number, qty: number, cost: number, medio: string, st: St, due?: string, at = now()): string | null {
-  const p = prod(s, pid);
-  if (!p) return 'Producto inexistente.';
-  if (qty <= 0 || cost < 0) return 'Cantidad y costo deben ser válidos.';
-  const tot = p.stock + qty;
-  p.cost = Math.round(((p.stock * p.cost + qty * cost) / tot) * 100) / 100; // costo promedio ponderado
-  p.stock = tot;
-  push(s, { type: 'PURCHASE', desc: `${qty}× ${p.name} (compra)`, amount: qty * cost, costAmt: 0, medio, status: st, at,
-    items: [{ pid, name: p.name, qty, price: 0, cost }], disc: 0 }, due);
+export function compra(s: S, lines: Ln[], medio: string, st: St, due: string | undefined, prov = '',
+  ivaPct = 0, ivaInc = false, at = now()): string | null {
+  if (!lines.length) return 'El detalle de la compra está vacío.';
+  for (const l of lines) {
+    if (!prod(s, l.pid)) return 'Producto inexistente.';
+    if (l.qty <= 0 || l.cost < 0) return 'Cantidad y costo deben ser válidos.';
+  }
+  const f = ivaInc && ivaPct ? 1 / (1 + ivaPct / 100) : 1; // el costo del producto se guarda sin IVA
+  const items: Item[] = []; let sum = 0;
+  for (const l of lines) {
+    const p = prod(s, l.pid)!, cn = l.cost * f, tot = p.stock + l.qty;
+    p.cost = Math.round(((p.stock * p.cost + l.qty * cn) / tot) * 100) / 100; // costo promedio ponderado
+    p.stock = tot; sum += l.qty * l.cost;
+    items.push({ pid: p.id, name: p.name, qty: l.qty, price: 0, cost: Math.round(cn * 100) / 100 });
+  }
+  const { total, iva } = calcIva(sum, ivaPct, ivaInc);
+  push(s, { type: 'PURCHASE', desc: items.map(i => `${i.qty}× ${i.name}`).join(', ') + ' (compra)' + sfx(ivaPct, iva, ivaInc, prov),
+    amount: total, costAmt: 0, medio, status: st, at, items, disc: 0, iva, prov: prov || undefined }, due);
   return null;
 }
 
-export function gasto(s: S, cat: string, desc: string, monto: number, medio: string, st: St, due?: string, at = now()): string | null {
-  if (monto <= 0) return 'El monto debe ser mayor a 0.';
-  push(s, { type: 'EXPENSE', desc: desc ? `${cat}: ${desc}` : cat, amount: monto, costAmt: 0, medio, status: st, at, items: [], disc: 0 }, due);
+export function gasto(s: S, lines: GLn[], medio: string, st: St, due: string | undefined, prov = '',
+  ivaPct = 0, ivaInc = false, at = now()): string | null {
+  if (!lines.length || lines.some(l => !(l.monto > 0))) return 'Cargá al menos un gasto con monto mayor a 0.';
+  const { total, iva } = calcIva(lines.reduce((a, l) => a + l.monto, 0), ivaPct, ivaInc);
+  push(s, { type: 'EXPENSE', desc: lines.map(l => (l.desc ? `${l.cat}: ${l.desc}` : l.cat)).join(' + ') + sfx(ivaPct, iva, ivaInc, prov),
+    amount: total, costAmt: 0, medio, status: st, at, items: [], disc: 0, iva, prov: prov || undefined }, due);
   return null;
 }
 
@@ -111,8 +135,8 @@ export function pyl(s: S, f: (d: Date) => boolean) {
   let v = 0, d = 0, c = 0, g = 0;
   for (const t of s.txs) {
     if (t.void || !f(new Date(t.at))) continue;
-    if (t.type === 'SALE') { v += t.amount + t.disc; d += t.disc; c += t.costAmt; }
-    else if (t.type === 'EXPENSE') g += t.amount;
+    if (t.type === 'SALE') { v += t.amount - (t.iva ?? 0) + t.disc; d += t.disc; c += t.costAmt; }
+    else if (t.type === 'EXPENSE') g += t.amount - (t.iva ?? 0);
   }
   return { v, d, c, g, vn: v - d, bruta: v - d - c, neta: v - d - c - g };
 }
@@ -132,14 +156,23 @@ export function seed(): S {
       { id: 6, name: 'Agua mineral 500ml', stock: 24, min: 12, cost: 600, price: 1400 }] };
   const ago = (h: number) => new Date(Date.now() - h * 36e5).toISOString();
   const day = (n: number) => new Date(Date.now() + n * 864e5).toISOString().slice(0, 10);
-  gasto(s, 'Alquiler', 'Alquiler del local', 350000, 'Transferencia Bancaria', 'PAID', undefined, ago(48));
-  compra(s, 4, 24, 700, 'Fiado / Cta Corriente', 'PENDING', day(10), ago(24));
+  gasto(s, [{ cat: 'Alquiler', desc: 'Alquiler del local', monto: 350000 }], 'Transferencia Bancaria', 'PAID', undefined, 'Inmobiliaria Centro', 0, false, ago(48));
+  compra(s, [{ pid: 4, qty: 24, cost: 700 }], 'Fiado / Cta Corriente', 'PENDING', day(10), 'Distribuidora Sur', 21, false, ago(24));
   venta(s, { 2: 5, 3: 5 }, 'Fiado / Cta Corriente', 'PENDING', day(-1), 'Oficina García', 0, ago(72));
   venta(s, { 3: 2, 1: 4 }, 'Efectivo', 'PAID', undefined, '', 0, ago(26));
   venta(s, { 3: 1, 1: 2 }, 'Efectivo', 'PAID', undefined, '', 0, ago(5));
   venta(s, { 2: 2, 6: 2 }, 'Mercado Pago', 'PAID', undefined, '', 0, ago(4));
   venta(s, { 5: 3, 4: 3 }, 'Efectivo', 'PAID', undefined, '', 0, ago(3));
   venta(s, { 3: 4, 1: 6 }, 'Fiado / Cta Corriente', 'PENDING', day(7), 'Estudio Pérez', 0, ago(2));
-  gasto(s, 'Servicios', 'Luz y gas', 18500, 'Efectivo', 'PAID', undefined, ago(1));
+  gasto(s, [{ cat: 'Servicios', desc: 'Luz y gas', monto: 18500 }], 'Efectivo', 'PAID', undefined, '', 21, true, ago(1));
   return s;
+}
+
+export function ivaRes(s: S, f: (d: Date) => boolean) {
+  let deb = 0, cred = 0;
+  for (const t of s.txs) {
+    if (t.void || !f(new Date(t.at))) continue;
+    if (t.type === 'SALE') deb += t.iva ?? 0; else if (t.type === 'PURCHASE' || t.type === 'EXPENSE') cred += t.iva ?? 0;
+  }
+  return { deb, cred };
 }
