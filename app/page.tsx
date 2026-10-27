@@ -1,0 +1,185 @@
+'use client';
+import { ReactNode, useEffect, useState } from 'react';
+import { S, St, Tx, anular, compra, flows, gasto, liquidar, money, nuevoProd, por, pyl, saldos, seed, venta } from '../lib/engine';
+
+const MESES = ['Ene', 'Feb', 'Mar', 'Abr', 'May', 'Jun', 'Jul', 'Ago', 'Sep', 'Oct', 'Nov', 'Dic'];
+const CATS = ['Alquiler', 'Sueldos', 'Servicios', 'Impuestos', 'Marketing', 'Mantenimiento', 'Otros'];
+const SECC = { A: '⚡ Registradora exprés', B: '📦 Inventario y costos', C: '🧾 Historial', D: '📊 Estados financieros' } as const;
+type Act = (fn: (n: S) => string | null, ok: string) => boolean;
+type Msg = { k: 'ok' | 'err'; t: string } | null;
+const fecha = (iso: string) => new Date(iso).toLocaleString('es-AR', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' });
+const venc = (t: Tx) => !!t.due && t.due < new Date().toISOString().slice(0, 10);
+
+function usePago(s: S, credito = true) {
+  const ms = s.medios.filter(m => credito || m.tipo !== 'credito').map(m => m.name);
+  const [medio, setM] = useState(ms[0]);
+  const [estado, setE] = useState<St>('PAID');
+  const [vence, setV] = useState(() => new Date(Date.now() + 15 * 864e5).toISOString().slice(0, 10));
+  const ui: ReactNode = (<>
+    <label>Medio de pago<select value={medio} onChange={e => setM(e.target.value)}>{ms.map(m => <option key={m}>{m}</option>)}</select></label>
+    <label>Estado<select value={estado} onChange={e => setE(e.target.value as St)}><option value="PAID">Pagado</option><option value="PENDING">Pendiente</option></select></label>
+    {estado === 'PENDING' && <label>Vence<input type="date" value={vence} onChange={e => setV(e.target.value)} /></label>}
+  </>);
+  return { medio, estado, vence, ui };
+}
+
+function Venta({ s, act }: { s: S; act: Act }) {
+  const [cart, setCart] = useState<Record<number, number>>({});
+  const [q, setQ] = useState(''); const [nota, setNota] = useState(''); const [pct, setPct] = useState(0);
+  const pg = usePago(s);
+  const add = (id: number, n: number) => {
+    const p = s.prods.find(x => x.id === id)!; const c = (cart[id] || 0) + n;
+    if (c > p.stock) return; const nc = { ...cart }; if (c <= 0) delete nc[id]; else nc[id] = c; setCart(nc);
+  };
+  const bruto = Object.entries(cart).reduce((a, [id, n]) => a + n * (s.prods.find(p => p.id === +id)?.price ?? 0), 0);
+  const total = bruto * (1 - pct / 100);
+  const lista = s.prods.filter(p => p.name.toLowerCase().includes(q.toLowerCase()));
+  return (<div className="grid">
+    <div>
+      <label>Buscar producto<input value={q} onChange={e => setQ(e.target.value)} placeholder="Escribí un nombre" /></label>
+      <div className="pills">{lista.map(p => (
+        <button key={p.id} disabled={p.stock <= (cart[p.id] || 0)} onClick={() => add(p.id, 1)}>{p.name} · {money(p.price)}</button>))}</div>
+    </div>
+    <div>
+      <h3>Ticket actual</h3>
+      {!Object.keys(cart).length && <p className="mut">Tocá un producto para agregarlo.</p>}
+      {Object.entries(cart).map(([id, n]) => { const p = s.prods.find(x => x.id === +id)!; return (
+        <div className="row" key={id}><span><b>{n}×</b> {p.name}</span>
+          <span>{money(n * p.price)} <button onClick={() => add(+id, -1)}>−</button> <button onClick={() => add(+id, 1)}>+</button></span></div>); })}
+      <div className="row"><span className="mut">Total</span><strong style={{ fontSize: 24 }}>{money(total)}</strong></div>
+      <div className="form">{pg.ui}
+        <label>Cliente / nota<input value={nota} onChange={e => setNota(e.target.value)} /></label>
+        <label>Descuento %<input type="number" min={0} max={100} value={pct} onChange={e => setPct(+e.target.value)} /></label></div>
+      <button className="p" disabled={!Object.keys(cart).length} onClick={() => {
+        if (act(n => venta(n, cart, pg.medio, pg.estado, pg.vence, nota.trim(), pct), `Venta registrada por ${money(total)}.`)) { setCart({}); setNota(''); setPct(0); }
+      }}>Confirmar venta</button>
+    </div></div>);
+}
+
+function Compra({ s, act }: { s: S; act: Act }) {
+  const [pid, setPid] = useState(s.prods[0]?.id ?? 0); const [qty, setQty] = useState(1); const [costo, setCosto] = useState(0);
+  const pg = usePago(s);
+  return (<><div className="form">
+    <label>Producto<select value={pid} onChange={e => setPid(+e.target.value)}>{s.prods.map(p => <option key={p.id} value={p.id}>{p.name} (stock {p.stock})</option>)}</select></label>
+    <label>Cantidad<input type="number" min={1} value={qty} onChange={e => setQty(+e.target.value)} /></label>
+    <label>Costo unitario<input type="number" min={0} value={costo} onChange={e => setCosto(+e.target.value)} /></label>{pg.ui}</div>
+    <button className="p" onClick={() => act(n => compra(n, pid, qty, costo, pg.medio, pg.estado, pg.vence), `Compra registrada por ${money(qty * costo)}.`)}>Registrar compra</button>
+    <p className="mut">Suma stock y recalcula el costo promedio ponderado.</p></>);
+}
+
+function Gasto({ s, act }: { s: S; act: Act }) {
+  const [cat, setCat] = useState(CATS[0]); const [desc, setDesc] = useState(''); const [monto, setMonto] = useState(0);
+  const pg = usePago(s);
+  return (<><div className="form">
+    <label>Categoría<select value={cat} onChange={e => setCat(e.target.value)}>{CATS.map(c => <option key={c}>{c}</option>)}</select></label>
+    <label>Monto<input type="number" min={0} value={monto} onChange={e => setMonto(+e.target.value)} /></label>
+    <label>Descripción<input value={desc} onChange={e => setDesc(e.target.value)} placeholder="Ej: factura de luz" /></label>{pg.ui}</div>
+    <button className="p" onClick={() => { if (act(n => gasto(n, cat, desc.trim(), monto, pg.medio, pg.estado, pg.vence), `Gasto registrado por ${money(monto)}.`)) { setDesc(''); setMonto(0); } }}>Registrar gasto</button></>);
+}
+
+function Liquidar({ s, act, cobro }: { s: S; act: Act; cobro: boolean }) {
+  const pend = por(s, cobro ? ['SALE'] : ['PURCHASE', 'EXPENSE']).sort((a, b) => (a.due ?? '9').localeCompare(b.due ?? '9'));
+  const ms = s.medios.filter(m => m.tipo !== 'credito').map(m => m.name);
+  const [medio, setM] = useState(ms[0]);
+  if (!pend.length) return <p className="mut">{cobro ? 'No hay cuentas por cobrar.' : 'No hay cuentas por pagar.'} 🎉</p>;
+  return (<><label style={{ maxWidth: 260 }}>{cobro ? 'Medio de cobro' : 'Medio de pago'}<select value={medio} onChange={e => setM(e.target.value)}>{ms.map(m => <option key={m}>{m}</option>)}</select></label>
+    {pend.map(t => (<div className="row" key={t.id}>
+      <span>#{t.id} · {t.desc.slice(0, 50)} · <b>{money(t.amount)}</b>{t.due && <span className={venc(t) ? 'neg' : 'mut'}> · vence {t.due.slice(5).split('-').reverse().join('/')}{venc(t) ? ' ⚠️ vencida' : ''}</span>}</span>
+      <button onClick={() => act(n => liquidar(n, t.id, medio), cobro ? 'Cobro registrado.' : 'Pago registrado.')}>{cobro ? 'Cobrar' : 'Pagar'}</button></div>))}</>);
+}
+
+function ModA({ s, act }: { s: S; act: Act }) {
+  const [t, setT] = useState('venta');
+  const tabs = { venta: '🛒 Venta', compra: '📥 Compra', gasto: '💸 Gasto', cobro: '💰 Cobro', pago: '🏦 Pago' };
+  return (<div className="box"><h3>Registradora exprés</h3>
+    <div className="pills">{Object.entries(tabs).map(([k, v]) => <button key={k} className={t === k ? 'on' : ''} onClick={() => setT(k)}>{v}</button>)}</div>
+    {t === 'venta' && <Venta s={s} act={act} />}{t === 'compra' && <Compra s={s} act={act} />}{t === 'gasto' && <Gasto s={s} act={act} />}
+    {t === 'cobro' && <Liquidar s={s} act={act} cobro />}{t === 'pago' && <Liquidar s={s} act={act} cobro={false} />}</div>);
+}
+
+function ModB({ s, act }: { s: S; act: Act }) {
+  const [f, setF] = useState({ name: '', price: 0, cost: 0, stock: 0, min: 5 });
+  const set = (k: keyof typeof f, v: string) => setF({ ...f, [k]: k === 'name' ? v : +v });
+  return (<div className="box"><h3>Inventario y costos</h3><div className="grid"><div className="scroll"><table>
+    <thead><tr><th>Producto</th><th>Stock</th><th>Mín.</th><th>Costo</th><th>Precio</th><th>Margen</th></tr></thead><tbody>
+      {s.prods.map(p => { const bajo = p.stock < p.min; return (<tr key={p.id} className={bajo ? 'neg' : ''}>
+        <td>{p.name}</td><td>{bajo ? '⚠️ ' : ''}{p.stock}</td><td>{p.min}</td><td>{money(p.cost)}</td><td>{money(p.price)}</td>
+        <td>{p.price ? Math.round((p.price - p.cost) / p.price * 100) : 0}%</td></tr>); })}</tbody></table></div>
+    <div><h3>Nuevo producto</h3><div className="form">
+      <label>Nombre<input value={f.name} onChange={e => set('name', e.target.value)} /></label>
+      <label>Precio de venta<input type="number" value={f.price} onChange={e => set('price', e.target.value)} /></label>
+      <label>Costo<input type="number" value={f.cost} onChange={e => set('cost', e.target.value)} /></label>
+      <label>Stock inicial<input type="number" value={f.stock} onChange={e => set('stock', e.target.value)} /></label>
+      <label>Stock mínimo<input type="number" value={f.min} onChange={e => set('min', e.target.value)} /></label></div>
+      <button className="p" onClick={() => { if (act(n => nuevoProd(n, f.name, f.price, f.cost, f.stock, f.min), `Producto «${f.name.trim()}» creado.`)) setF({ name: '', price: 0, cost: 0, stock: 0, min: 5 }); }}>Crear producto</button></div>
+  </div></div>);
+}
+
+function ModC({ s, act }: { s: S; act: Act }) {
+  const [q, setQ] = useState(''); const k = q.trim().toLowerCase().replace('#', '');
+  const lista = [...s.txs].reverse().filter(t => !k || t.desc.toLowerCase().includes(k) || t.medio.toLowerCase().includes(k) || String(t.id) === k);
+  const ING = ['SALE', 'COLLECTION'];
+  return (<div className="box"><h3>Historial de transacciones</h3>
+    <input value={q} onChange={e => setQ(e.target.value)} placeholder="Buscar por detalle, medio o #número" />
+    <div className="scroll"><table><thead><tr><th>#</th><th>Fecha</th><th>Tipo</th><th>Detalle</th><th>Medio</th><th>Estado</th><th>Monto</th><th></th></tr></thead><tbody>
+      {lista.map(t => (<tr key={t.id} style={t.void ? { opacity: .45 } : undefined}>
+        <td>{t.id}</td><td>{fecha(t.at)}</td><td>{t.type}</td><td style={{ textAlign: 'left' }}>{t.desc}</td><td>{t.medio}</td>
+        <td>{t.void ? '❌ Anulada' : t.status === 'PAID' ? '✅ Pagado' : venc(t) ? '⚠️ Vencida' : '⏳ Pendiente'}</td>
+        <td className={ING.includes(t.type) ? 'pos' : ''}>{ING.includes(t.type) ? '+' : '−'}{money(t.amount)}</td>
+        <td>{!t.void && <button onClick={() => act(n => anular(n, t.id), `Operación #${t.id} anulada.`)}>Anular</button>}</td></tr>))}</tbody></table></div>
+    {!lista.length && <p className="mut">No hay operaciones para mostrar.</p>}</div>);
+}
+
+function Tabla({ title, rows }: { title: string; rows: [string, number[], boolean?][] }) {
+  return (<div className="scroll"><table><thead><tr><th>{title}</th>{MESES.map(m => <th key={m}>{m}</th>)}<th>Total</th></tr></thead><tbody>
+    {rows.map(([l, v, sub]) => (<tr key={l} className={sub ? 's' : ''}><td>{l}</td>
+      {[...v, v.reduce((a, b) => a + b, 0)].map((x, i) => <td key={i} className={x < 0 ? 'neg' : ''}>{Math.abs(x) < .005 ? '–' : money(x)}</td>)}</tr>))}</tbody></table></div>);
+}
+
+function ModD({ s }: { s: S }) {
+  const y = new Date().getFullYear();
+  const er = MESES.map((_, i) => pyl(s, d => d.getFullYear() === y && d.getMonth() === i));
+  const fl = { cobros: Array(12).fill(0), compras: Array(12).fill(0), gastos: Array(12).fill(0) };
+  flows(s).forEach(f => { if (f.d.getFullYear() === y) fl[f.c][f.d.getMonth()] += f.a; });
+  const neto = fl.cobros.map((c, i) => c - fl.compras[i] - fl.gastos[i]);
+  const col = (k: 'v' | 'd' | 'vn' | 'c' | 'bruta' | 'g' | 'neta') => er.map(e => e[k]);
+  const cobrar = por(s, ['SALE']).reduce((a, t) => a + t.amount, 0), pagar = por(s, ['PURCHASE', 'EXPENSE']).reduce((a, t) => a + t.amount, 0);
+  const { caja, banco } = saldos(s);
+  return (<div className="box"><h3>Estado de resultados · {y}</h3>
+    <Tabla title="Concepto" rows={[['Ventas', col('v')], ['(−) Descuentos', col('d').map(x => -x)], ['Ventas netas', col('vn'), true],
+      ['(−) Costo de ventas', col('c').map(x => -x)], ['Utilidad bruta', col('bruta'), true], ['(−) Gastos', col('g').map(x => -x)], ['Utilidad neta', col('neta'), true]]} />
+    <p className="mut">Criterio devengado: cuenta el día que se registra, aunque se cobre o pague después.</p>
+    <h3 style={{ marginTop: 18 }}>Flujo de caja · {y}</h3>
+    <Tabla title="Concepto" rows={[['Cobros', fl.cobros], ['(−) Compras', fl.compras.map(x => -x)], ['(−) Gastos', fl.gastos.map(x => -x)], ['Flujo del mes', neto, true]]} />
+    <p className="mut">Solo plata que entró o salió de verdad (el fiado cuenta recién cuando se cobra o se paga).</p>
+    <h3 style={{ marginTop: 18 }}>Posición a hoy</h3>
+    <div className="row"><span>Dinero disponible (caja + bancos)</span><b>{money(caja + banco)}</b></div>
+    <div className="row"><span>(+) Por cobrar</span><b className="pos">{money(cobrar)}</b></div>
+    <div className="row"><span>(−) Por pagar</span><b className="neg">{money(pagar)}</b></div>
+    <div className="row"><span>= Posición proyectada</span><b>{money(caja + banco + cobrar - pagar)}</b></div></div>);
+}
+
+export default function Page() {
+  const [s, setS] = useState<S | null>(null); const [tab, setTab] = useState<keyof typeof SECC>('A'); const [msg, setMsg] = useState<Msg>(null);
+  useEffect(() => { setS(seed()); }, []);
+  useEffect(() => { if (msg) { const t = setTimeout(() => setMsg(null), 3500); return () => clearTimeout(t); } }, [msg]);
+  if (!s) return null;
+  const act: Act = (fn, ok) => {
+    const n = structuredClone(s); const e = fn(n);
+    if (e) { setMsg({ k: 'err', t: e }); return false; }
+    setS(n); setMsg({ k: 'ok', t: ok }); return true;
+  };
+  const h = new Date(), mes = pyl(s, d => d.getMonth() === h.getMonth() && d.getFullYear() === h.getFullYear());
+  const { caja, banco } = saldos(s); const bajos = s.prods.filter(p => p.stock < p.min).length;
+  return (<div className="wrap">
+    <div className="top"><div className="brand">🏢 Capital<b>+</b> PyMEs</div>
+      <span><span className="mut">🧪 Modo simulación: los datos no se guardan </span><button onClick={() => { setS(seed()); setMsg({ k: 'ok', t: 'Datos de ejemplo reiniciados.' }); }}>Reiniciar</button></span></div>
+    <div className="kpis">
+      <div className="kpi"><small>💵 Caja chica</small><strong>{money(caja)}</strong></div>
+      <div className="kpi"><small>🏦 Bancos / Digital</small><strong>{money(banco)}</strong></div>
+      <div className="kpi"><small>📦 Stock crítico</small><strong className={bajos ? 'neg' : ''}>{bajos}</strong></div>
+      <div className="kpi"><small>📊 Resultado neto del mes</small><strong className={mes.neta < 0 ? 'neg' : 'pos'}>{money(mes.neta)}</strong></div></div>
+    <div className="nav">{(Object.keys(SECC) as (keyof typeof SECC)[]).map(k => <button key={k} className={tab === k ? 'on' : ''} onClick={() => setTab(k)}>{SECC[k]}</button>)}</div>
+    {tab === 'A' && <ModA s={s} act={act} />}{tab === 'B' && <ModB s={s} act={act} />}{tab === 'C' && <ModC s={s} act={act} />}{tab === 'D' && <ModD s={s} />}
+    {msg && <div className={'toast ' + (msg.k === 'err' ? 'err' : '')}>{msg.t}</div>}</div>);
+}
