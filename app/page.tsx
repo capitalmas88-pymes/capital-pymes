@@ -1,6 +1,6 @@
 'use client';
 import { ReactNode, useEffect, useState } from 'react';
-import { S, St, Tx, anular, compra, flows, gasto, liquidar, money, nuevoProd, por, pyl, saldos, seed, venta } from '../lib/engine';
+import { GLn, Ln, S, St, Tx, anular, calcIva, compra, flows, ivaRes, gasto, liquidar, money, nuevoProd, por, pyl, saldos, seed, venta } from '../lib/engine';
 
 const MESES = ['Ene', 'Feb', 'Mar', 'Abr', 'May', 'Jun', 'Jul', 'Ago', 'Sep', 'Oct', 'Nov', 'Dic'];
 const CATS = ['Alquiler', 'Sueldos', 'Servicios', 'Impuestos', 'Marketing', 'Mantenimiento', 'Otros'];
@@ -23,16 +23,27 @@ function usePago(s: S, credito = true) {
   return { medio, estado, vence, ui };
 }
 
+const IVAS = [0, 10.5, 21, 27];
+function useIva() {
+  const [pct, setP] = useState(0); const [inc, setI] = useState(false);
+  const ui: ReactNode = (<>
+    <label>IVA<select value={pct} onChange={e => setP(+e.target.value)}>{IVAS.map(v => <option key={v} value={v}>{v ? `${v}%` : 'Sin IVA'}</option>)}</select></label>
+    {pct > 0 && <label>El importe…<select value={inc ? '1' : '0'} onChange={e => setI(e.target.value === '1')}>
+      <option value="0">No incluye IVA</option><option value="1">Ya incluye IVA</option></select></label>}
+  </>);
+  return { pct, inc, ui };
+}
+
 function Venta({ s, act }: { s: S; act: Act }) {
   const [cart, setCart] = useState<Record<number, number>>({});
   const [q, setQ] = useState(''); const [nota, setNota] = useState(''); const [pct, setPct] = useState(0);
-  const pg = usePago(s);
+  const pg = usePago(s); const iv = useIva();
   const add = (id: number, n: number) => {
     const p = s.prods.find(x => x.id === id)!; const c = (cart[id] || 0) + n;
     if (c > p.stock) return; const nc = { ...cart }; if (c <= 0) delete nc[id]; else nc[id] = c; setCart(nc);
   };
   const bruto = Object.entries(cart).reduce((a, [id, n]) => a + n * (s.prods.find(p => p.id === +id)?.price ?? 0), 0);
-  const total = bruto * (1 - pct / 100);
+  const { total, iva: ivaM } = calcIva(bruto * (1 - pct / 100), iv.pct, iv.inc);
   const lista = s.prods.filter(p => p.name.toLowerCase().includes(q.toLowerCase()));
   return (<div className="grid">
     <div>
@@ -46,35 +57,67 @@ function Venta({ s, act }: { s: S; act: Act }) {
       {Object.entries(cart).map(([id, n]) => { const p = s.prods.find(x => x.id === +id)!; return (
         <div className="row" key={id}><span><b>{n}×</b> {p.name}</span>
           <span>{money(n * p.price)} <button onClick={() => add(+id, -1)}>−</button> <button onClick={() => add(+id, 1)}>+</button></span></div>); })}
+      {ivaM > 0 && <div className="row"><span className="mut">IVA incluido en el total</span><span>{money(ivaM)}</span></div>}
       <div className="row"><span className="mut">Total</span><strong style={{ fontSize: 24 }}>{money(total)}</strong></div>
-      <div className="form">{pg.ui}
+      <div className="form">{pg.ui}{iv.ui}
         <label>Cliente / nota<input value={nota} onChange={e => setNota(e.target.value)} /></label>
         <label>Descuento %<input type="number" min={0} max={100} value={pct} onChange={e => setPct(+e.target.value)} /></label></div>
       <button className="p" disabled={!Object.keys(cart).length} onClick={() => {
-        if (act(n => venta(n, cart, pg.medio, pg.estado, pg.vence, nota.trim(), pct), `Venta registrada por ${money(total)}.`)) { setCart({}); setNota(''); setPct(0); }
+        if (act(n => venta(n, cart, pg.medio, pg.estado, pg.vence, nota.trim(), pct, undefined, iv.pct, iv.inc), `Venta registrada por ${money(total)}.`)) { setCart({}); setNota(''); setPct(0); }
       }}>Confirmar venta</button>
     </div></div>);
 }
 
+function Totales({ sub, pct, inc }: { sub: number; pct: number; inc: boolean }) {
+  const { total, iva } = calcIva(sub, pct, inc);
+  return (<>
+    <div className="row"><span className="mut">Subtotal</span><span>{money(sub)}</span></div>
+    {iva > 0 && <div className="row"><span className="mut">IVA {pct}%{inc ? ' (incluido)' : ''}</span><span>{money(iva)}</span></div>}
+    <div className="row"><span className="mut">Total</span><strong style={{ fontSize: 24 }}>{money(total)}</strong></div></>);
+}
+
 function Compra({ s, act }: { s: S; act: Act }) {
+  const [lines, setLines] = useState<Ln[]>([]); const [prov, setProv] = useState('');
   const [pid, setPid] = useState(s.prods[0]?.id ?? 0); const [qty, setQty] = useState(1); const [costo, setCosto] = useState(0);
-  const pg = usePago(s);
-  return (<><div className="form">
-    <label>Producto<select value={pid} onChange={e => setPid(+e.target.value)}>{s.prods.map(p => <option key={p.id} value={p.id}>{p.name} (stock {p.stock})</option>)}</select></label>
-    <label>Cantidad<input type="number" min={1} value={qty} onChange={e => setQty(+e.target.value)} /></label>
-    <label>Costo unitario<input type="number" min={0} value={costo} onChange={e => setCosto(+e.target.value)} /></label>{pg.ui}</div>
-    <button className="p" onClick={() => act(n => compra(n, pid, qty, costo, pg.medio, pg.estado, pg.vence), `Compra registrada por ${money(qty * costo)}.`)}>Registrar compra</button>
-    <p className="mut">Suma stock y recalcula el costo promedio ponderado.</p></>);
+  const pg = usePago(s); const iv = useIva();
+  const sub = lines.reduce((a, l) => a + l.qty * l.cost, 0);
+  return (<>
+    <h3>Agregar productos al detalle</h3>
+    <div className="form">
+      <label>Producto<select value={pid} onChange={e => setPid(+e.target.value)}>{s.prods.map(p => <option key={p.id} value={p.id}>{p.name} (stock {p.stock})</option>)}</select></label>
+      <label>Cantidad<input type="number" min={1} value={qty} onChange={e => setQty(+e.target.value)} /></label>
+      <label>Costo unitario<input type="number" min={0} value={costo} onChange={e => setCosto(+e.target.value)} /></label>
+      <div style={{ alignSelf: 'end' }}><button disabled={qty <= 0} onClick={() => { setLines([...lines, { pid, qty, cost: costo }]); setQty(1); setCosto(0); }}>➕ Agregar</button></div></div>
+    <h3>Detalle de la compra</h3>
+    {!lines.length && <p className="mut">Agregá uno o más productos antes de registrar.</p>}
+    {lines.map((l, i) => (<div className="row" key={i}><span><b>{l.qty}×</b> {s.prods.find(p => p.id === l.pid)?.name}</span>
+      <span>{money(l.qty * l.cost)} <button onClick={() => setLines(lines.filter((_, k) => k !== i))}>✕</button></span></div>))}
+    {!!lines.length && <Totales sub={sub} pct={iv.pct} inc={iv.inc} />}
+    <div className="form"><label>Proveedor<input value={prov} onChange={e => setProv(e.target.value)} placeholder="Ej: Distribuidora Sur" /></label>{pg.ui}{iv.ui}</div>
+    <button className="p" disabled={!lines.length} onClick={() => { if (act(n => compra(n, lines, pg.medio, pg.estado, pg.vence, prov.trim(), iv.pct, iv.inc), 'Compra registrada.')) { setLines([]); setProv(''); } }}>Registrar compra</button>
+    <p className="mut">Suma stock y recalcula el costo promedio ponderado. Con IVA incluido, el costo del producto se guarda sin IVA.</p></>);
 }
 
 function Gasto({ s, act }: { s: S; act: Act }) {
+  const [lines, setLines] = useState<GLn[]>([]); const [prov, setProv] = useState('');
   const [cat, setCat] = useState(CATS[0]); const [desc, setDesc] = useState(''); const [monto, setMonto] = useState(0);
-  const pg = usePago(s);
-  return (<><div className="form">
-    <label>Categoría<select value={cat} onChange={e => setCat(e.target.value)}>{CATS.map(c => <option key={c}>{c}</option>)}</select></label>
-    <label>Monto<input type="number" min={0} value={monto} onChange={e => setMonto(+e.target.value)} /></label>
-    <label>Descripción<input value={desc} onChange={e => setDesc(e.target.value)} placeholder="Ej: factura de luz" /></label>{pg.ui}</div>
-    <button className="p" onClick={() => { if (act(n => gasto(n, cat, desc.trim(), monto, pg.medio, pg.estado, pg.vence), `Gasto registrado por ${money(monto)}.`)) { setDesc(''); setMonto(0); } }}>Registrar gasto</button></>);
+  const pg = usePago(s); const iv = useIva();
+  const sub = lines.reduce((a, l) => a + l.monto, 0);
+  return (<>
+    <h3>Agregar gastos o servicios al detalle</h3>
+    <div className="form">
+      <label>Categoría<select value={cat} onChange={e => setCat(e.target.value)}>{CATS.map(c => <option key={c}>{c}</option>)}</select></label>
+      <label>Descripción<input value={desc} onChange={e => setDesc(e.target.value)} placeholder="Ej: factura de luz" /></label>
+      <label>Monto<input type="number" min={0} value={monto} onChange={e => setMonto(+e.target.value)} /></label>
+      <div style={{ alignSelf: 'end' }}><button disabled={!(monto > 0)} onClick={() => { setLines([...lines, { cat, desc: desc.trim(), monto }]); setDesc(''); setMonto(0); }}>➕ Agregar</button></div></div>
+    <h3>Detalle del gasto</h3>
+    {!lines.length && <p className="mut">Agregá uno o más gastos antes de registrar.</p>}
+    {lines.map((l, i) => (<div className="row" key={i}><span><b>{l.cat}</b>{l.desc && `: ${l.desc}`}</span>
+      <span>{money(l.monto)} <button onClick={() => setLines(lines.filter((_, k) => k !== i))}>✕</button></span></div>))}
+    {!!lines.length && <Totales sub={sub} pct={iv.pct} inc={iv.inc} />}
+    <div className="form"><label>Proveedor<input value={prov} onChange={e => setProv(e.target.value)} placeholder="Ej: Edenor" /></label>{pg.ui}{iv.ui}</div>
+    <button className="p" disabled={!lines.length} onClick={() => { if (act(n => gasto(n, lines, pg.medio, pg.estado, pg.vence, prov.trim(), iv.pct, iv.inc), 'Gasto registrado.')) { setLines([]); setProv(''); } }}>Registrar gasto</button>
+    <p className="mut">El IVA sale de la caja pero no cuenta como gasto en el estado de resultados.</p></>);
 }
 
 function Liquidar({ s, act, cobro }: { s: S; act: Act; cobro: boolean }) {
@@ -145,6 +188,7 @@ function ModD({ s }: { s: S }) {
   const col = (k: 'v' | 'd' | 'vn' | 'c' | 'bruta' | 'g' | 'neta') => er.map(e => e[k]);
   const cobrar = por(s, ['SALE']).reduce((a, t) => a + t.amount, 0), pagar = por(s, ['PURCHASE', 'EXPENSE']).reduce((a, t) => a + t.amount, 0);
   const { caja, banco } = saldos(s);
+  const hh = new Date(); const ivr = ivaRes(s, d => d.getFullYear() === hh.getFullYear() && d.getMonth() === hh.getMonth());
   return (<div className="box"><h3>Estado de resultados · {y}</h3>
     <Tabla title="Concepto" rows={[['Ventas', col('v')], ['(−) Descuentos', col('d').map(x => -x)], ['Ventas netas', col('vn'), true],
       ['(−) Costo de ventas', col('c').map(x => -x)], ['Utilidad bruta', col('bruta'), true], ['(−) Gastos', col('g').map(x => -x)], ['Utilidad neta', col('neta'), true]]} />
@@ -156,7 +200,11 @@ function ModD({ s }: { s: S }) {
     <div className="row"><span>Dinero disponible (caja + bancos)</span><b>{money(caja + banco)}</b></div>
     <div className="row"><span>(+) Por cobrar</span><b className="pos">{money(cobrar)}</b></div>
     <div className="row"><span>(−) Por pagar</span><b className="neg">{money(pagar)}</b></div>
-    <div className="row"><span>= Posición proyectada</span><b>{money(caja + banco + cobrar - pagar)}</b></div></div>);
+    <div className="row"><span>= Posición proyectada</span><b>{money(caja + banco + cobrar - pagar)}</b></div>
+    <h3 style={{ marginTop: 18 }}>IVA del mes</h3>
+    <div className="row"><span>IVA débito (ventas)</span><b>{money(ivr.deb)}</b></div>
+    <div className="row"><span>(−) IVA crédito (compras y gastos)</span><b>{money(ivr.cred)}</b></div>
+    <div className="row"><span>= {ivr.deb >= ivr.cred ? 'IVA a pagar' : 'Saldo a favor'}</span><b>{money(Math.abs(ivr.deb - ivr.cred))}</b></div></div>);
 }
 
 export default function Page() {
