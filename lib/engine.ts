@@ -5,7 +5,7 @@ export type Medio = { name: string; tipo: 'caja' | 'banco' | 'credito' };
 export type Item = { pid: number; name: string; qty: number; price: number; cost: number };
 export type Tx = { id: number; type: Tipo; desc: string; amount: number; costAmt: number; medio: string; status: St;
   due?: string; at: string; items: Item[]; void: boolean; paidBy?: number; pays?: number; disc: number; iva?: number; prov?: string };
-export type S = { prods: Prod[]; txs: Tx[]; medios: Medio[]; caja0: number; banco0: number; seq: number };
+export type S = { prods: Prod[]; txs: Tx[]; medios: Medio[]; caja0: number; banco0: number; seq: number; cfg: Cfg; neg: Neg };
 
 export const money = (v: number) => (v < 0 ? '-' : '') + '$' + Math.abs(Math.round(v)).toLocaleString('es-AR');
 const now = () => new Date().toISOString();
@@ -144,7 +144,7 @@ export function pyl(s: S, f: (d: Date) => boolean) {
 export const por = (s: S, tipos: Tipo[]) => s.txs.filter(t => !t.void && t.status === 'PENDING' && tipos.includes(t.type));
 
 export function seed(): S {
-  const s: S = { seq: 0, caja0: 60000, banco0: 600000, txs: [],
+  const s: S = { seq: 0, cfg: cfgDefault(), neg: { nombre: '', cuit: '', tel: '', dir: '', email: '' }, caja0: 60000, banco0: 600000, txs: [],
     medios: [{ name: 'Efectivo', tipo: 'caja' }, { name: 'Mercado Pago', tipo: 'banco' },
       { name: 'Transferencia Bancaria', tipo: 'banco' }, { name: 'Fiado / Cta Corriente', tipo: 'credito' }],
     prods: [
@@ -175,4 +175,45 @@ export function ivaRes(s: S, f: (d: Date) => boolean) {
     if (t.type === 'SALE') deb += t.iva ?? 0; else if (t.type === 'PURCHASE' || t.type === 'EXPENSE') cred += t.iva ?? 0;
   }
   return { deb, cred };
+}
+
+export type Neg = { nombre: string; cuit: string; tel: string; dir: string; email: string };
+export type Cfg = { packaging: number; envio: number; comision: number; iibb: number; retenciones: number; redTipo: string; redMult: number;
+  pasarelas: { name: string; pct: number }[]; plataformas: { name: string; pct: number }[]; cuotas: Record<number, number[]>;
+  mv: number; mm: number; desc: number };
+export const REDONDEOS = ['Ninguno', 'Múltiplo', 'Psicológico (990/999)'];
+export const CUOTAS = [2, 3, 6, 12];
+export function cfgDefault(): Cfg {
+  return { packaging: 100, envio: 200, comision: 5, iibb: 3, retenciones: 2, redTipo: REDONDEOS[2], redMult: 10,
+    pasarelas: [{ name: 'Mercado Pago', pct: 7 }, { name: 'PayU', pct: 3.5 }, { name: 'Stripe', pct: 2.9 }],
+    plataformas: [{ name: 'MercadoLibre', pct: 4 }, { name: 'Tienda Nube', pct: 3 }, { name: 'Shopify', pct: 2 }],
+    cuotas: { 2: [11, 7, 9], 3: [15, 12, 16], 6: [30, 27, 32], 12: [70, 60, 68] }, mv: 30, mm: 15, desc: 0 };
+}
+export type Sel = { pack: boolean; envio: boolean; com: boolean; iibb: boolean; ret: boolean; pas: number; plat: number; desc: number };
+export const selDefault: Sel = { pack: false, envio: false, com: false, iibb: true, ret: true, pas: 0, plat: 0, desc: 0 };
+
+export function redondear(p: number, c: Cfg) {
+  const m = Math.max(c.redMult, 1);
+  if (c.redTipo === 'Múltiplo') return Math.ceil(p / m) * m;
+  if (c.redTipo.startsWith('Psicol')) return p < 1000 ? Math.ceil(p / m) * m : Math.ceil((p + m) / 1000) * 1000 - m;
+  return Math.round(p * 100) / 100;
+}
+
+// Margen sobre el PRECIO FINAL: precio = (costo + fijos) / (1 − margen% − % que se lleva el precio)
+export function calcPrecio(costo: number, margen: number, c: Cfg, sel: Sel, cuotas = 1, pas = sel.pas) {
+  const fijos: [string, number][] = [];
+  if (sel.pack) fijos.push(['Packaging', c.packaging]);
+  if (sel.envio) fijos.push(['Envío', c.envio]);
+  const pa = pas ? c.pasarelas[pas - 1] : null, pl = sel.plat ? c.plataformas[sel.plat - 1] : null;
+  const pcts: [string, number][] = [
+    ['Comisión vendedor', sel.com ? c.comision : 0], ['Ingresos Brutos', sel.iibb ? c.iibb : 0], ['Retenciones', sel.ret ? c.retenciones : 0],
+    [pa ? `Pasarela (${pa.name})` : 'Pasarela', pa ? pa.pct : 0], ['Recargo por cuotas', pa && cuotas > 1 ? c.cuotas[cuotas][pas - 1] : 0],
+    [pl ? `Plataforma (${pl.name})` : 'Plataforma', pl ? pl.pct : 0]];
+  const den = 1 - (margen + pcts.reduce((a, [, x]) => a + x, 0)) / 100;
+  if (den <= 0.01) return null;
+  const base = costo + fijos.reduce((a, [, x]) => a + x, 0), d = Math.min(sel.desc || 0, 99);
+  const lista = redondear(base / den / (1 - d / 100), c), final = lista * (1 - d / 100);
+  const ded = pcts.filter(([, x]) => x).map(([n, x]) => [n, final * x / 100, x] as [string, number, number]);
+  const ganancia = final - base - ded.reduce((a, [, v]) => a + v, 0);
+  return { costo, fijos, base, lista, final, d, descMonto: lista - final, ded, ganancia, real: final ? ganancia / final * 100 : 0 };
 }
