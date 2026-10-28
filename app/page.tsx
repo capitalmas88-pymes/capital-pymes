@@ -1,6 +1,7 @@
 'use client';
 import { ReactNode, useEffect, useState } from 'react';
-import { CUOTAS, Cfg, GLn, Ln, REDONDEOS, S, Sel, calcPrecio, selDefault, St, Tx, anular, calcIva, compra, flows, ivaRes, gasto, liquidar, money, nuevoProd, por, pyl, saldos, seed, venta } from '../lib/engine';
+import { CUOTAS, Cfg, GLn, Ln, REDONDEOS, S, Sel, calcPrecio, selDefault, St, Tx, abierta, anular, calcIva, compra, flows, ivaRes, gasto, liquidar, money, nuevoProd, por, pyl, saldos, seed, stk, venta } from '../lib/engine';
+import { Apertura, Cierre, Combos, EstadoCaja, Movs } from './Extras';
 
 const MESES = ['Ene', 'Feb', 'Mar', 'Abr', 'May', 'Jun', 'Jul', 'Ago', 'Sep', 'Oct', 'Nov', 'Dic'];
 const CATS = ['Alquiler', 'Sueldos', 'Servicios', 'Impuestos', 'Marketing', 'Mantenimiento', 'Otros'];
@@ -40,7 +41,7 @@ function Venta({ s, act }: { s: S; act: Act }) {
   const pg = usePago(s); const iv = useIva();
   const add = (id: number, n: number) => {
     const p = s.prods.find(x => x.id === id)!; const c = (cart[id] || 0) + n;
-    if (c > p.stock) return; const nc = { ...cart }; if (c <= 0) delete nc[id]; else nc[id] = c; setCart(nc);
+    if (c > stk(s, p)) return; const nc = { ...cart }; if (c <= 0) delete nc[id]; else nc[id] = c; setCart(nc);
   };
   const bruto = Object.entries(cart).reduce((a, [id, n]) => a + n * (s.prods.find(p => p.id === +id)?.price ?? 0), 0);
   const { total, iva: ivaM } = calcIva(bruto * (1 - pct / 100), iv.pct, iv.inc);
@@ -49,7 +50,7 @@ function Venta({ s, act }: { s: S; act: Act }) {
     <div>
       <label>Buscar producto<input value={q} onChange={e => setQ(e.target.value)} placeholder="Escribí un nombre" /></label>
       <div className="pills">{lista.map(p => (
-        <button key={p.id} disabled={p.stock <= (cart[p.id] || 0)} onClick={() => add(p.id, 1)}>{p.name} · {money(p.price)}</button>))}</div>
+        <button key={p.id} disabled={stk(s, p) <= (cart[p.id] || 0)} onClick={() => add(p.id, 1)}>{p.combo ? '🎁 ' : ''}{p.name} · {money(p.price)}</button>))}</div>
     </div>
     <div>
       <h3>Ticket actual</h3>
@@ -77,14 +78,15 @@ function Totales({ sub, pct, inc }: { sub: number; pct: number; inc: boolean }) 
 }
 
 function Compra({ s, act }: { s: S; act: Act }) {
+  const comprables = s.prods.filter(p => !p.combo);
   const [lines, setLines] = useState<Ln[]>([]); const [prov, setProv] = useState('');
-  const [pid, setPid] = useState(s.prods[0]?.id ?? 0); const [qty, setQty] = useState(1); const [costo, setCosto] = useState(0);
+  const [pid, setPid] = useState(comprables[0]?.id ?? 0); const [qty, setQty] = useState(1); const [costo, setCosto] = useState(0);
   const pg = usePago(s); const iv = useIva();
   const sub = lines.reduce((a, l) => a + l.qty * l.cost, 0);
   return (<>
     <h3>Agregar productos al detalle</h3>
     <div className="form">
-      <label>Producto<select value={pid} onChange={e => setPid(+e.target.value)}>{s.prods.map(p => <option key={p.id} value={p.id}>{p.name} (stock {p.stock})</option>)}</select></label>
+      <label>Producto<select value={pid} onChange={e => setPid(+e.target.value)}>{comprables.map(p => <option key={p.id} value={p.id}>{p.name} (stock {p.stock})</option>)}</select></label>
       <label>Cantidad<input type="number" min={1} value={qty} onChange={e => setQty(+e.target.value)} /></label>
       <label>Costo unitario<input type="number" min={0} value={costo} onChange={e => setCosto(+e.target.value)} /></label>
       <div style={{ alignSelf: 'end' }}><button disabled={qty <= 0} onClick={() => { setLines([...lines, { pid, qty, cost: costo }]); setQty(1); setCosto(0); }}>➕ Agregar</button></div></div>
@@ -131,13 +133,27 @@ function Liquidar({ s, act, cobro }: { s: S; act: Act; cobro: boolean }) {
       <button onClick={() => act(n => liquidar(n, t.id, medio), cobro ? 'Cobro registrado.' : 'Pago registrado.')}>{cobro ? 'Cobrar' : 'Pagar'}</button></div>))}</>);
 }
 
-function ModA({ s, act }: { s: S; act: Act }) {
+// Sub-pestaña "Registrar": ventas, compras, gastos, cobros y pagos
+function Registrar({ s, act }: { s: S; act: Act }) {
   const [t, setT] = useState('venta');
   const tabs = { venta: '🛒 Venta', compra: '📥 Compra', gasto: '💸 Gasto', cobro: '💰 Cobro', pago: '🏦 Pago' };
-  return (<div className="box"><h3>Registradora exprés</h3>
+  return (<div>
     <div className="pills">{Object.entries(tabs).map(([k, v]) => <button key={k} className={t === k ? 'on' : ''} onClick={() => setT(k)}>{v}</button>)}</div>
     {t === 'venta' && <Venta s={s} act={act} />}{t === 'compra' && <Compra s={s} act={act} />}{t === 'gasto' && <Gasto s={s} act={act} />}
     {t === 'cobro' && <Liquidar s={s} act={act} cobro />}{t === 'pago' && <Liquidar s={s} act={act} cobro={false} />}</div>);
+}
+
+// Caja: Registrar | Apertura | Cierre | Movimientos
+function ModA({ s, act }: { s: S; act: Act }) {
+  const [v, setV] = useState('reg');
+  const tabs = { reg: '✏️ Registrar', ape: '🔓 Apertura', cie: '🔒 Cierre', mov: '💱 Movimientos' };
+  return (<div className="box">
+    <div className="row"><h3>Caja</h3><EstadoCaja s={s} /></div>
+    <div className="pills">{Object.entries(tabs).map(([k, l]) => <button key={k} className={v === k ? 'on' : ''} onClick={() => setV(k)}>{l}</button>)}</div>
+    {v === 'reg' && (abierta(s) ? <Registrar s={s} act={act} /> : <p className="neg">🔒 La caja está cerrada. Abrila en la pestaña Apertura para operar.</p>)}
+    {v === 'ape' && <Apertura s={s} act={act} />}
+    {v === 'cie' && <Cierre s={s} act={act} />}
+    {v === 'mov' && <Movs s={s} act={act} />}</div>);
 }
 
 function ModB({ s, act }: { s: S; act: Act }) {
@@ -145,8 +161,8 @@ function ModB({ s, act }: { s: S; act: Act }) {
   const set = (k: keyof typeof f, v: string) => setF({ ...f, [k]: k === 'name' ? v : +v });
   return (<><div className="box"><h3>Inventario y costos</h3><div className="grid"><div className="scroll"><table>
     <thead><tr><th>Producto</th><th>Stock</th><th>Mín.</th><th>Costo</th><th>Precio</th><th>Margen</th></tr></thead><tbody>
-      {s.prods.map(p => { const bajo = p.stock < p.min; return (<tr key={p.id} className={bajo ? 'neg' : ''}>
-        <td>{p.name}</td><td>{bajo ? '⚠️ ' : ''}{p.stock}</td><td>{p.min}</td><td>{money(p.cost)}</td><td>{money(p.price)}</td>
+      {s.prods.map(p => { const bajo = stk(s, p) < p.min; return (<tr key={p.id} className={bajo ? 'neg' : ''}>
+        <td>{p.combo ? '🎁 ' : ''}{p.name}</td><td>{bajo ? '⚠️ ' : ''}{stk(s, p)}</td><td>{p.min}</td><td>{money(p.cost)}</td><td>{money(p.price)}</td>
         <td>{p.price ? Math.round((p.price - p.cost) / p.price * 100) : 0}%</td></tr>); })}</tbody></table></div>
     <div><h3>Nuevo producto</h3><div className="form">
       <label>Nombre<input value={f.name} onChange={e => set('name', e.target.value)} /></label>
@@ -156,6 +172,7 @@ function ModB({ s, act }: { s: S; act: Act }) {
       <label>Stock mínimo<input type="number" value={f.min} onChange={e => set('min', e.target.value)} /></label></div>
       <button className="p" onClick={() => { if (act(n => nuevoProd(n, f.name, f.price, f.cost, f.stock, f.min), `Producto «${f.name.trim()}» creado.`)) setF({ name: '', price: 0, cost: 0, stock: 0, min: 5 }); }}>Crear producto</button></div>
   </div></div>
+    <Combos s={s} act={act} />
     <Calc s={s} act={act} /></>);
 }
 
@@ -228,7 +245,7 @@ function Calc({ s, act }: { s: S; act: Act }) {
     {vista === 'calc' ? <div className="grid"><div>
       <div className="form">
         <label>Producto<select value={pid} onChange={e => { const id = +e.target.value; setPid(id); setCosto(s.prods.find(x => x.id === id)?.cost ?? 0); }}>
-          <option value={0}>— Manual —</option>{s.prods.map(x => <option key={x.id} value={x.id}>{x.name}</option>)}</select></label>
+          <option value={0}>— Manual —</option>{s.prods.map(x => <option key={x.id} value={x.id}>{x.combo ? '🎁 ' : ''}{x.name}</option>)}</select></label>
         <label>Costo base $<input type="number" min={0} value={costo} onChange={e => setCosto(+e.target.value)} /></label>
         <label>Margen venta %<input type="number" value={mv} onChange={e => setMv(+e.target.value)} /></label>
         <label>Margen mayorista %<input type="number" value={mm} onChange={e => setMm(+e.target.value)} /></label>
@@ -303,7 +320,7 @@ export default function Page() {
     setS(n); setMsg({ k: 'ok', t: ok }); return true;
   };
   const h = new Date(), mes = pyl(s, d => d.getMonth() === h.getMonth() && d.getFullYear() === h.getFullYear());
-  const { caja, banco } = saldos(s); const bajos = s.prods.filter(p => p.stock < p.min).length;
+  const { caja, banco } = saldos(s); const bajos = s.prods.filter(p => stk(s, p) < p.min).length;
   return (<div className="wrap">
     <div className="top"><div className="brand">🏢 {s.neg.nombre || <>Capital<b>+</b> PyMEs</>}</div>
       <span><span className="mut">🧪 Modo simulación: los datos no se guardan </span><button onClick={() => { setS({ ...seed(), neg: s.neg, cfg: s.cfg }); setMsg({ k: 'ok', t: 'Datos de ejemplo reiniciados.' }); }}>Reiniciar</button></span></div>
