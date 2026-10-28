@@ -1,6 +1,6 @@
 'use client';
 import { ReactNode, useEffect, useState } from 'react';
-import { CUOTAS, Cfg, GLn, Ln, REDONDEOS, RLn, S, Sel, calcPrecio, selDefault, St, Tx, abierta, anular, calcIva, compra, costoReceta, eliminarReceta, fabricar, flows, ivaRes, gasto, liquidar, money, nuevaReceta, nuevoInsumo, nuevoProd, por, pyl, saldos, seed, stk, venta } from '../lib/engine';
+import { CUOTAS, Cfg, GLn, Insumo, Ln, Prod, REDONDEOS, RLn, S, Sel, calcPrecio, selDefault, St, Tx, abierta, anular, calcIva, compra, costoReceta, eliminarReceta, fabricar, flows, ivaRes, gasto, liquidar, money, nuevaReceta, nuevoInsumo, nuevoProd, por, pyl, saldos, seed, stk, venta } from '../lib/engine';
 import { Apertura, Cierre, Combos, EstadoCaja, Movs } from './Extras';
 
 const MESES = ['Ene', 'Feb', 'Mar', 'Abr', 'May', 'Jun', 'Jul', 'Ago', 'Sep', 'Oct', 'Nov', 'Dic'];
@@ -81,7 +81,7 @@ function Compra({ s, act }: { s: S; act: Act }) {
   const comprables = s.prods.filter(p => !p.combo);
   const [lines, setLines] = useState<Ln[]>([]); const [prov, setProv] = useState('');
   const [esIns, setEs] = useState(false);
-  const lista = esIns ? s.insumos : comprables;
+  const lista: (Prod | Insumo)[] = esIns ? s.insumos : comprables;
   const [pid, setPid] = useState(comprables[0]?.id ?? 0); const [qty, setQty] = useState(1); const [costo, setCosto] = useState(0);
   const cambiar = (v: boolean) => { setEs(v); setPid((v ? s.insumos : comprables)[0]?.id ?? 0); };
   const nom = (l: Ln) => (l.ins ? s.insumos.find(i => i.id === l.pid) : s.prods.find(p => p.id === l.pid))?.name;
@@ -349,7 +349,8 @@ function Recetas({ s, act }: { s: S; act: Act }) {
 
 function NuevaReceta({ s, act }: { s: S; act: Act }) {
   const [name, setName] = useState(''); const [lote, setLote] = useState(12); const [unidad, setUnidad] = useState('Unidad');
-  const [ins, setIns] = useState<RLn[]>([]); const [iid, setIid] = useState(s.insumos[0]?.id ?? 0); const [cant, setCant] = useState(0);
+  const [ins, setIns] = useState<RLn[]>([]); const [iid0, setIid] = useState(0); const [cant, setCant] = useState(0);
+  const iid = s.insumos.some(i => i.id === iid0) ? iid0 : s.insumos[0]?.id ?? 0;
   const [mo, setMo] = useState(0); const [cfMes, setCfMes] = useState(0); const [hMes, setHMes] = useState(200); const [hLote, setHLote] = useState(1);
   const [merma, setMerma] = useState(0);
   const cf = hMes > 0 ? cfMes / hMes * hLote : 0;
