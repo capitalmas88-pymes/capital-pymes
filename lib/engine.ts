@@ -2,15 +2,17 @@ export type Tipo = 'SALE' | 'PURCHASE' | 'EXPENSE' | 'COLLECTION' | 'PAYMENT';
 export type St = 'PAID' | 'PENDING';
 export type Prod = { id: number; name: string; stock: number; min: number; cost: number; price: number;
   combo?: { pid: number; qty: number }[]; notes?: string };
-export type Medio = { name: string; tipo: 'caja' | 'banco' | 'credito' };
+export type Medio = { name: string; tipo: 'caja' | 'banco' | 'credito'; com?: number }; // com = comisión % del medio
 export type Item = { pid: number; name: string; qty: number; price: number; cost: number; ins?: boolean };
+export type Pago = { medio: string; monto: number };
 export type Tx = { id: number; type: Tipo; desc: string; amount: number; costAmt: number; medio: string; status: St;
-  due?: string; at: string; items: Item[]; void: boolean; paidBy?: number; pays?: number; disc: number; iva?: number; prov?: string };
+  due?: string; at: string; items: Item[]; void: boolean; paidBy?: number; pays?: number; disc: number; iva?: number; prov?: string;
+  rec?: number; split?: Pago[] }; // rec = recargo trasladado al cliente por el medio de pago · split = pago mixto
 export type Turno = { id: number; abre: string; cierra?: string; inicial: Record<string, number>; nota: string;
   esperado?: Record<string, number>; contado?: Record<string, number>; cierreNota?: string };
 export type Mov = { id: number; turno: number; at: string; tipo: 'IN' | 'OUT'; medio: string; monto: number; desc: string; void: boolean };
 export type Insumo = { id: number; name: string; unit: string; stock: number; min: number; cost: number };
-export type RLn = { iid: number; qty: number };
+export type RLn = { iid: number; qty: number; merma?: number }; // merma % propia del insumo (si falta, usa la general)
 export type Receta = { id: number; name: string; lote: number; unidad: string; ins: RLn[]; mo: number; cf: number; merma: number; pid: number };
 export type Fab = { id: number; rid: number; qty: number; at: string; costoU: number; desc: boolean };
 export type S = { prods: Prod[]; txs: Tx[]; medios: Medio[]; caja0: number; banco0: number; seq: number; cfg: Cfg; neg: Neg;
@@ -18,6 +20,7 @@ export type S = { prods: Prod[]; txs: Tx[]; medios: Medio[]; caja0: number; banc
 
 export const money = (v: number) => (v < 0 ? '-' : '') + '$' + Math.abs(Math.round(v)).toLocaleString('es-AR');
 const now = () => new Date().toISOString();
+const r2 = (x: number) => Math.round(x * 100) / 100;
 export const medioTipo = (s: S, n: string) => s.medios.find(m => m.name === n)?.tipo ?? 'banco';
 const prod = (s: S, id: number) => s.prods.find(p => p.id === id);
 
@@ -51,6 +54,16 @@ function push(s: S, t: Omit<Tx, 'id' | 'void'>, due?: string) {
   s.txs.push(x); return x;
 }
 
+/* ───────── Cuentas corrientes: abonos parciales ───────── */
+export const abonos = (s: S, id: number) => s.txs.filter(t => !t.void && t.pays === id);
+export const saldo = (s: S, t: Tx) => Math.max(0, r2(t.amount - abonos(s, t.id).reduce((a, x) => a + x.amount, 0)));
+
+// recargo que se traslada al cliente según la comisión del medio de pago (solo si la config lo pide)
+export function recargoMedio(s: S, medio: string, monto: number) {
+  const c = s.cfg.trasladaCom ? (s.medios.find(m => m.name === medio)?.com ?? 0) : 0;
+  return c > 0 && c < 100 ? r2(monto / (1 - c / 100) - monto) : 0;
+}
+
 export type Ln = { pid: number; qty: number; cost: number; ins?: boolean };
 export type GLn = { cat: string; desc: string; monto: number };
 export function calcIva(base: number, pct: number, inc: boolean) {
@@ -63,7 +76,7 @@ const sfx = (pct: number, iva: number, inc: boolean, prov: string) =>
   (iva ? ` · IVA ${pct}% ${money(iva)}${inc ? ' incl.' : ''}` : '') + (prov ? ` · Prov. ${prov}` : '');
 
 export function venta(s: S, cart: Record<number, number>, medio: string, st: St, due: string | undefined,
-  nota = '', pct = 0, at = now(), ivaPct = 0, ivaInc = false): string | null {
+  nota = '', pct = 0, at = now(), ivaPct = 0, ivaInc = false, split?: Pago[]): string | null {
   if (!abierta(s)) return CERRADA;
   const ids = Object.keys(cart).map(Number);
   if (!ids.length) return 'El ticket está vacío.';
@@ -71,17 +84,32 @@ export function venta(s: S, cart: Record<number, number>, medio: string, st: St,
     const p = prod(s, id);
     if (!p) return 'Un producto del ticket ya no existe.';
     if (stk(s, p) < cart[id]) return `Stock insuficiente de ${p.name} (hay ${stk(s, p)}).`;
+    if (s.cfg.bloqueaMin && stk(s, p) < p.min) return `${p.name} está bajo el stock mínimo y la configuración bloquea su venta.`;
   }
   const items: Item[] = []; let bruto = 0, costo = 0;
   for (const id of ids) {
     const p = prod(s, id)!, q = cart[id];
     items.push({ pid: id, name: p.name, qty: q, price: p.price, cost: p.cost });
-    bruto += q * p.price; costo += q * p.cost; mueve(s, p, -q);
+    bruto += q * p.price; costo += q * p.cost;
   }
   const disc = Math.round(bruto * Math.min(Math.max(pct, 0), 100)) / 100;
   const { total, iva } = calcIva(bruto - disc, ivaPct, ivaInc);
-  push(s, { type: 'SALE', desc: items.map(i => `${i.qty}× ${i.name}`).join(', ') + (disc ? ` (desc. ${pct}%)` : '') + sfx(ivaPct, iva, ivaInc, '') + (nota ? ` — ${nota}` : ''),
-    amount: total, costAmt: costo, medio, status: st, at, items, disc, iva }, due);
+
+  // pago mixto: los montos (sin recargo) deben sumar el total de la venta
+  let parts: Pago[] | undefined;
+  if (split && split.length) {
+    if (split.some(p => !(p.monto > 0) || medioTipo(s, p.medio) === 'credito')) return 'El pago mixto necesita montos mayores a 0 en medios que no sean fiado.';
+    const sum = split.reduce((a, p) => a + p.monto, 0);
+    if (Math.abs(sum - total) > 0.01) return `Los pagos mixtos suman ${money(sum)} y la venta es de ${money(total)}.`;
+    parts = split.map(p => ({ medio: p.medio, monto: r2(p.monto + recargoMedio(s, p.medio, p.monto)) }));
+    st = 'PAID'; medio = parts.map(p => p.medio).join(' + ');
+  }
+  const rec = parts ? r2(parts.reduce((a, p) => a + p.monto, 0) - total) : recargoMedio(s, medio, total);
+
+  ids.forEach(id => mueve(s, prod(s, id)!, -cart[id]));
+  push(s, { type: 'SALE', desc: items.map(i => `${i.qty}× ${i.name}`).join(', ') + (disc ? ` (desc. ${pct}%)` : '') + sfx(ivaPct, iva, ivaInc, '')
+      + (parts ? ` · Mixto: ${parts.map(p => `${p.medio} ${money(p.monto)}`).join(' + ')}` : '') + (rec ? ` · Recargo medio ${money(rec)}` : '') + (nota ? ` — ${nota}` : ''),
+    amount: r2(total + rec), costAmt: costo, medio, status: st, at, items, disc, iva, rec: rec || undefined, split: parts }, due);
   return null;
 }
 
@@ -121,20 +149,27 @@ export function gasto(s: S, lines: GLn[], medio: string, st: St, due: string | u
   return null;
 }
 
-export function liquidar(s: S, id: number, medio: string): string | null {
+// Cobra / paga una cuenta pendiente, total o parcialmente (monto vacío = saldo completo)
+export function liquidar(s: S, id: number, medio: string, monto?: number): string | null {
   if (!abierta(s)) return CERRADA;
   const o = s.txs.find(t => t.id === id);
   if (!o || o.void || o.status !== 'PENDING') return 'Esa cuenta ya no está pendiente.';
-  const cobro = o.type === 'SALE';
-  const n = push(s, { type: cobro ? 'COLLECTION' : 'PAYMENT', desc: `${cobro ? 'Cobro' : 'Pago'} de #${o.id} · ${o.desc}`,
-    amount: o.amount, costAmt: 0, medio, status: 'PAID', at: now(), items: [], pays: o.id, disc: 0 });
-  o.status = 'PAID'; o.paidBy = n.id; return null;
+  if (medioTipo(s, medio) === 'credito') return 'Elegí un medio real (caja o banco).';
+  const sd = saldo(s, o), m = monto == null ? sd : r2(monto);
+  if (!(m > 0)) return 'El monto debe ser mayor a 0.';
+  if (m > sd + 0.005) return `El monto supera el saldo pendiente (${money(sd)}).`;
+  const cobro = o.type === 'SALE', parcial = m < sd - 0.005;
+  const n = push(s, { type: cobro ? 'COLLECTION' : 'PAYMENT', desc: `${cobro ? 'Cobro' : 'Pago'}${parcial ? ' parcial' : ''} de #${o.id} · ${o.desc}`,
+    amount: m, costAmt: 0, medio, status: 'PAID', at: now(), items: [], pays: o.id, disc: 0 });
+  if (!parcial) { o.status = 'PAID'; o.paidBy = n.id; }
+  return null;
 }
 
 export function anular(s: S, id: number): string | null {
   const t = s.txs.find(x => x.id === id);
   if (!t || t.void) return 'La operación no existe o ya está anulada.';
-  if (t.paidBy) return `Primero anulá el cobro/pago #${t.paidBy} que la liquidó.`;
+  const ab = abonos(s, id);
+  if (ab.length) return `Primero anulá los cobros/pagos aplicados (#${ab.map(x => x.id).join(', #')}).`;
   if (t.type === 'SALE') t.items.forEach(i => { const p = prod(s, i.pid); if (p) mueve(s, p, i.qty); });
   else if (t.type === 'PURCHASE') t.items.forEach(i => {
     const p = i.ins ? s.insumos.find(x => x.id === i.pid) : prod(s, i.pid);
@@ -193,18 +228,53 @@ export function nuevoInsumo(s: S, name: string, unit: string, cost: number, stoc
   return null;
 }
 
+// Merma: cada insumo puede tener la suya; si no, usa la merma general de la receta
 export function costoReceta(s: S, r: Pick<Receta, 'ins' | 'mo' | 'cf' | 'merma' | 'lote'>) {
-  const ins = r.ins.reduce((a, l) => a + l.qty * (s.insumos.find(i => i.id === l.iid)?.cost ?? 0), 0);
-  const merma = ins * r.merma / 100;
+  let ins = 0, merma = 0;
+  for (const l of r.ins) {
+    const c = l.qty * (s.insumos.find(i => i.id === l.iid)?.cost ?? 0);
+    ins += c; merma += c * (l.merma ?? r.merma) / 100;
+  }
   const total = ins + r.mo + r.cf + merma;
   return { ins, mo: r.mo, cf: r.cf, merma, total, unit: r.lote > 0 ? total / r.lote : 0 };
+}
+
+// Qué pasa si el costo de un insumo cambia: recetas afectadas, costo unitario y precio sugerido
+export function impactoCosto(s: S, iid: number, nuevo: number) {
+  const t: S = { ...s, insumos: s.insumos.map(i => i.id === iid ? { ...i, cost: nuevo } : i) };
+  return s.recetas.filter(r => r.ins.some(l => l.iid === iid)).map(r => {
+    const antes = costoReceta(s, r).unit, despues = costoReceta(t, r).unit, p = prod(s, r.pid);
+    const sug = calcPrecio(despues, s.cfg.mv, s.cfg, selDefault)?.lista ?? 0;
+    return { id: r.id, name: r.name, antes, despues, precio: p?.price ?? 0, sug,
+      margen: p && p.price > 0 ? (p.price - despues) / p.price * 100 : 0 };
+  });
+}
+
+export function cambiarCostoInsumo(s: S, id: number, cost: number, recalc: boolean): string | null {
+  const i = s.insumos.find(x => x.id === id);
+  if (!i) return 'El insumo no existe.';
+  if (!(cost >= 0)) return 'El costo no puede ser negativo.';
+  i.cost = cost;
+  const tocados = new Set<number>();
+  for (const r of s.recetas) {
+    if (!r.ins.some(l => l.iid === id)) continue;
+    const p = prod(s, r.pid); if (!p) continue;
+    const u = Math.round(costoReceta(s, r).unit * 100) / 100;
+    p.cost = u; tocados.add(p.id);
+    if (recalc) { const q = calcPrecio(u, s.cfg.mv, s.cfg, selDefault); if (q) p.price = q.lista; }
+  }
+  recosto(s);
+  if (recalc) s.prods.forEach(p => {
+    if (p.combo && p.combo.some(c => tocados.has(c.pid))) { const q = calcPrecio(p.cost, s.cfg.mv, s.cfg, selDefault); if (q) p.price = q.lista; }
+  });
+  return null;
 }
 
 export function nuevaReceta(s: S, name: string, lote: number, unidad: string, ins: RLn[], mo: number, cf: number, merma: number): string | null {
   if (!name.trim()) return 'Poné un nombre a la receta.';
   if (!(lote > 0)) return 'La cantidad por lote debe ser mayor a 0.';
   if (!ins.length) return 'Agregá al menos un insumo.';
-  if (mo < 0 || cf < 0 || merma < 0) return 'Mano de obra, costos fijos y merma no pueden ser negativos.';
+  if (mo < 0 || cf < 0 || merma < 0 || ins.some(l => (l.merma ?? 0) < 0)) return 'Mano de obra, costos fijos y merma no pueden ser negativos.';
   let p = s.prods.find(x => x.name.toLowerCase() === name.trim().toLowerCase());
   if (p?.combo) return 'Ese nombre corresponde a un combo.';
   if (p && s.recetas.some(r => r.pid === p!.id)) return 'Ya hay una receta para ese producto.';
@@ -266,7 +336,11 @@ export function flows(s: S) {
   for (const t of s.txs) {
     if (t.void) continue;
     const d = new Date(t.at), paid = t.status === 'PAID', liq = t.paidBy != null;
-    if (t.type === 'COLLECTION' || (t.type === 'SALE' && paid && !liq)) o.push({ d, c: 'cobros', a: t.amount, m: t.medio });
+    if (t.type === 'SALE' && paid && !liq) {
+      if (t.split) t.split.forEach(p => o.push({ d, c: 'cobros', a: p.monto, m: p.medio })); // pago mixto
+      else o.push({ d, c: 'cobros', a: t.amount, m: t.medio });
+    }
+    else if (t.type === 'COLLECTION') o.push({ d, c: 'cobros', a: t.amount, m: t.medio });
     else if (t.type === 'PAYMENT') o.push({ d, c: s.txs.find(x => x.id === t.pays)?.type === 'PURCHASE' ? 'compras' : 'gastos', a: t.amount, m: t.medio });
     else if (t.type === 'PURCHASE' && paid && !liq) o.push({ d, c: 'compras', a: t.amount, m: t.medio });
     else if (t.type === 'EXPENSE' && paid && !liq) o.push({ d, c: 'gastos', a: t.amount, m: t.medio });
@@ -292,7 +366,8 @@ export function pyl(s: S, f: (d: Date) => boolean) {
   let v = 0, d = 0, c = 0, g = 0;
   for (const t of s.txs) {
     if (t.void || !f(new Date(t.at))) continue;
-    if (t.type === 'SALE') { v += t.amount - (t.iva ?? 0) + t.disc; d += t.disc; c += t.costAmt; }
+    // el recargo trasladado por el medio de pago no es ingreso del negocio: es plata de paso
+    if (t.type === 'SALE') { v += t.amount - (t.iva ?? 0) - (t.rec ?? 0) + t.disc; d += t.disc; c += t.costAmt; }
     else if (t.type === 'EXPENSE') g += t.amount - (t.iva ?? 0);
   }
   return { v, d, c, g, vn: v - d, bruta: v - d - c, neta: v - d - c - g };
@@ -308,10 +383,10 @@ export function seed(): S {
       { id: 2, name: 'Manteca', unit: 'kg', stock: 8, min: 3, cost: 7500 },
       { id: 3, name: 'Azúcar', unit: 'kg', stock: 12, min: 5, cost: 1100 }],
     recetas: [{ id: 1, name: 'Medialuna', lote: 12, unidad: 'Unidad', pid: 1, mo: 2000, cf: 500, merma: 5,
-      ins: [{ iid: 1, qty: 0.6 }, { iid: 2, qty: 0.3 }, { iid: 3, qty: 0.05 }] }],
+      ins: [{ iid: 1, qty: 0.6 }, { iid: 2, qty: 0.3, merma: 8 }, { iid: 3, qty: 0.05 }] }],
     fabs: [],
-    medios: [{ name: 'Efectivo', tipo: 'caja' }, { name: 'Mercado Pago', tipo: 'banco' },
-      { name: 'Transferencia Bancaria', tipo: 'banco' }, { name: 'Fiado / Cta Corriente', tipo: 'credito' }],
+    medios: [{ name: 'Efectivo', tipo: 'caja' }, { name: 'Mercado Pago', tipo: 'banco', com: 7 },
+      { name: 'Transferencia Bancaria', tipo: 'banco', com: 0 }, { name: 'Fiado / Cta Corriente', tipo: 'credito' }],
     prods: [
       { id: 1, name: 'Medialuna', stock: 36, min: 12, cost: 350, price: 900 },
       { id: 2, name: 'Tostado J&Q', stock: 15, min: 6, cost: 1600, price: 4200 },
@@ -346,14 +421,19 @@ export function ivaRes(s: S, f: (d: Date) => boolean) {
 export type Neg = { nombre: string; cuit: string; tel: string; dir: string; email: string };
 export type Cfg = { packaging: number; envio: number; comision: number; iibb: number; retenciones: number; redTipo: string; redMult: number;
   pasarelas: { name: string; pct: number }[]; plataformas: { name: string; pct: number }[]; cuotas: Record<number, number[]>;
-  mv: number; mm: number; desc: number };
+  mv: number; mm: number; desc: number;
+  mgOk: number; mgBajo: number;            // semáforo de rentabilidad (margen %)
+  trasladaCom: boolean;                    // comisión de pasarela/plataforma/medio de pago: la paga el cliente
+  trasladaCuotas: boolean;                 // recargo por cuotas: lo paga el cliente
+  bloqueaMin: boolean };                   // bloquear ventas de productos bajo el stock mínimo
 export const REDONDEOS = ['Ninguno', 'Múltiplo', 'Psicológico (990/999)'];
 export const CUOTAS = [2, 3, 6, 12];
 export function cfgDefault(): Cfg {
   return { packaging: 100, envio: 200, comision: 5, iibb: 3, retenciones: 2, redTipo: REDONDEOS[2], redMult: 10,
     pasarelas: [{ name: 'Mercado Pago', pct: 7 }, { name: 'PayU', pct: 3.5 }, { name: 'Stripe', pct: 2.9 }],
     plataformas: [{ name: 'MercadoLibre', pct: 4 }, { name: 'Tienda Nube', pct: 3 }, { name: 'Shopify', pct: 2 }],
-    cuotas: { 2: [11, 7, 9], 3: [15, 12, 16], 6: [30, 27, 32], 12: [70, 60, 68] }, mv: 30, mm: 15, desc: 0 };
+    cuotas: { 2: [11, 7, 9], 3: [15, 12, 16], 6: [30, 27, 32], 12: [70, 60, 68] }, mv: 30, mm: 15, desc: 0,
+    mgOk: 30, mgBajo: 15, trasladaCom: false, trasladaCuotas: false, bloqueaMin: false };
 }
 export type Sel = { pack: boolean; envio: boolean; com: boolean; iibb: boolean; ret: boolean; pas: number; plat: number; desc: number };
 export const selDefault: Sel = { pack: false, envio: false, com: false, iibb: true, ret: true, pas: 0, plat: 0, desc: 0 };
@@ -365,21 +445,46 @@ export function redondear(p: number, c: Cfg) {
   return Math.round(p * 100) / 100;
 }
 
-// Margen sobre el PRECIO FINAL: precio = (costo + fijos) / (1 − margen% − % que se lleva el precio)
-export function calcPrecio(costo: number, margen: number, c: Cfg, sel: Sel, cuotas = 1, pas = sel.pas) {
+// Cargos de una venta. El 3er valor indica si lo paga el cliente (trasladado) en vez del comercio.
+function cargos(c: Cfg, sel: Sel, cuotas: number, pas: number) {
   const fijos: [string, number][] = [];
   if (sel.pack) fijos.push(['Packaging', c.packaging]);
   if (sel.envio) fijos.push(['Envío', c.envio]);
   const pa = pas ? c.pasarelas[pas - 1] : null, pl = sel.plat ? c.plataformas[sel.plat - 1] : null;
-  const pcts: [string, number][] = [
-    ['Comisión vendedor', sel.com ? c.comision : 0], ['Ingresos Brutos', sel.iibb ? c.iibb : 0], ['Retenciones', sel.ret ? c.retenciones : 0],
-    [pa ? `Pasarela (${pa.name})` : 'Pasarela', pa ? pa.pct : 0], ['Recargo por cuotas', pa && cuotas > 1 ? c.cuotas[cuotas][pas - 1] : 0],
-    [pl ? `Plataforma (${pl.name})` : 'Plataforma', pl ? pl.pct : 0]];
-  const den = 1 - (margen + pcts.reduce((a, [, x]) => a + x, 0)) / 100;
+  const pcts: [string, number, boolean][] = [
+    ['Comisión vendedor', sel.com ? c.comision : 0, false], ['Ingresos Brutos', sel.iibb ? c.iibb : 0, false], ['Retenciones', sel.ret ? c.retenciones : 0, false],
+    [pa ? `Pasarela (${pa.name})` : 'Pasarela', pa ? pa.pct : 0, c.trasladaCom],
+    ['Recargo por cuotas', pa && cuotas > 1 ? (c.cuotas[cuotas]?.[pas - 1] ?? 0) : 0, c.trasladaCuotas],
+    [pl ? `Plataforma (${pl.name})` : 'Plataforma', pl ? pl.pct : 0, c.trasladaCom]];
+  return { fijos, pcts };
+}
+
+// Margen sobre el PRECIO FINAL: precio = (costo + fijos) / (1 − margen% − % que absorbe el comercio)
+// Los cargos trasladados no entran en el precio de lista: se suman al ticket del cliente.
+export function calcPrecio(costo: number, margen: number, c: Cfg, sel: Sel, cuotas = 1, pas = sel.pas) {
+  const { fijos, pcts } = cargos(c, sel, cuotas, pas);
+  const absorbe = pcts.filter(p => !p[2]).reduce((a, p) => a + p[1], 0);
+  const traslada = Math.min(pcts.filter(p => p[2]).reduce((a, p) => a + p[1], 0), 95);
+  const den = 1 - (margen + absorbe) / 100;
   if (den <= 0.01) return null;
   const base = costo + fijos.reduce((a, [, x]) => a + x, 0), d = Math.min(sel.desc || 0, 99);
   const lista = redondear(base / den / (1 - d / 100), c), final = lista * (1 - d / 100);
-  const ded = pcts.filter(([, x]) => x).map(([n, x]) => [n, final * x / 100, x] as [string, number, number]);
-  const ganancia = final - base - ded.reduce((a, [, v]) => a + v, 0);
-  return { costo, fijos, base, lista, final, d, descMonto: lista - final, ded, ganancia, real: final ? ganancia / final * 100 : 0 };
+  const cliente = traslada ? r2(final / (1 - traslada / 100)) : final;
+  const ded = pcts.filter(p => p[1]).map(([n, x, t]) => [n, (t ? cliente : final) * x / 100, x, t] as [string, number, number, boolean]);
+  const ganancia = final - base - ded.filter(x => !x[3]).reduce((a, x) => a + x[1], 0);
+  return { costo, fijos, base, lista, final, cliente, recargo: cliente - final, d, descMonto: lista - final, ded, ganancia, real: final ? ganancia / final * 100 : 0 };
+}
+
+// Simulador inverso: con un precio de venta impuesto por el mercado, devuelve ganancia y margen real.
+export function calcInverso(costo: number, precio: number, c: Cfg, sel: Sel, cuotas = 1, pas = sel.pas) {
+  if (!(precio > 0) || !(costo >= 0)) return null;
+  const { fijos, pcts } = cargos(c, sel, cuotas, pas);
+  const base = costo + fijos.reduce((a, [, x]) => a + x, 0), d = Math.min(sel.desc || 0, 99);
+  const final = precio * (1 - d / 100);
+  const traslada = Math.min(pcts.filter(p => p[2]).reduce((a, p) => a + p[1], 0), 95);
+  const cliente = traslada ? r2(final / (1 - traslada / 100)) : final;
+  const ded = pcts.filter(p => p[1]).map(([n, x, t]) => [n, (t ? cliente : final) * x / 100, x, t] as [string, number, number, boolean]);
+  const ganancia = final - base - ded.filter(x => !x[3]).reduce((a, x) => a + x[1], 0);
+  return { costo, fijos, base, lista: precio, final, cliente, recargo: cliente - final, d, descMonto: precio - final, ded, ganancia,
+    real: final ? ganancia / final * 100 : 0, markup: base > 0 ? ganancia / base * 100 : 0 };
 }
