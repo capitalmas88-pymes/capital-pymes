@@ -3,14 +3,18 @@ export type St = 'PAID' | 'PENDING';
 export type Prod = { id: number; name: string; stock: number; min: number; cost: number; price: number;
   combo?: { pid: number; qty: number }[]; notes?: string };
 export type Medio = { name: string; tipo: 'caja' | 'banco' | 'credito' };
-export type Item = { pid: number; name: string; qty: number; price: number; cost: number };
+export type Item = { pid: number; name: string; qty: number; price: number; cost: number; ins?: boolean };
 export type Tx = { id: number; type: Tipo; desc: string; amount: number; costAmt: number; medio: string; status: St;
   due?: string; at: string; items: Item[]; void: boolean; paidBy?: number; pays?: number; disc: number; iva?: number; prov?: string };
 export type Turno = { id: number; abre: string; cierra?: string; inicial: Record<string, number>; nota: string;
   esperado?: Record<string, number>; contado?: Record<string, number>; cierreNota?: string };
 export type Mov = { id: number; turno: number; at: string; tipo: 'IN' | 'OUT'; medio: string; monto: number; desc: string; void: boolean };
+export type Insumo = { id: number; name: string; unit: string; stock: number; min: number; cost: number };
+export type RLn = { iid: number; qty: number };
+export type Receta = { id: number; name: string; lote: number; unidad: string; ins: RLn[]; mo: number; cf: number; merma: number; pid: number };
+export type Fab = { id: number; rid: number; qty: number; at: string; costoU: number; desc: boolean };
 export type S = { prods: Prod[]; txs: Tx[]; medios: Medio[]; caja0: number; banco0: number; seq: number; cfg: Cfg; neg: Neg;
-  turnos: Turno[]; movs: Mov[] };
+  turnos: Turno[]; movs: Mov[]; insumos: Insumo[]; recetas: Receta[]; fabs: Fab[] };
 
 export const money = (v: number) => (v < 0 ? '-' : '') + '$' + Math.abs(Math.round(v)).toLocaleString('es-AR');
 const now = () => new Date().toISOString();
@@ -47,7 +51,7 @@ function push(s: S, t: Omit<Tx, 'id' | 'void'>, due?: string) {
   s.txs.push(x); return x;
 }
 
-export type Ln = { pid: number; qty: number; cost: number };
+export type Ln = { pid: number; qty: number; cost: number; ins?: boolean };
 export type GLn = { cat: string; desc: string; monto: number };
 export function calcIva(base: number, pct: number, inc: boolean) {
   const r = (x: number) => Math.round(x * 100) / 100;
@@ -85,19 +89,20 @@ export function compra(s: S, lines: Ln[], medio: string, st: St, due: string | u
   ivaPct = 0, ivaInc = false, at = now()): string | null {
   if (!abierta(s)) return CERRADA;
   if (!lines.length) return 'El detalle de la compra está vacío.';
+  const ref = (l: Ln) => l.ins ? s.insumos.find(i => i.id === l.pid) : prod(s, l.pid);
   for (const l of lines) {
-    const pp = prod(s, l.pid);
-    if (!pp) return 'Producto inexistente.';
-    if (pp.combo) return 'Un combo no se compra: comprá sus productos.';
+    const pp = ref(l);
+    if (!pp) return 'Producto o insumo inexistente.';
+    if (!l.ins && (pp as Prod).combo) return 'Un combo no se compra: comprá sus productos.';
     if (l.qty <= 0 || l.cost < 0) return 'Cantidad y costo deben ser válidos.';
   }
-  const f = ivaInc && ivaPct ? 1 / (1 + ivaPct / 100) : 1; // el costo del producto se guarda sin IVA
+  const f = ivaInc && ivaPct ? 1 / (1 + ivaPct / 100) : 1; // el costo se guarda sin IVA
   const items: Item[] = []; let sum = 0;
   for (const l of lines) {
-    const p = prod(s, l.pid)!, cn = l.cost * f, tot = p.stock + l.qty;
+    const p = ref(l)!, cn = l.cost * f, tot = p.stock + l.qty;
     p.cost = Math.round(((p.stock * p.cost + l.qty * cn) / tot) * 100) / 100; // costo promedio ponderado
-    p.stock = tot; sum += l.qty * l.cost;
-    items.push({ pid: p.id, name: p.name, qty: l.qty, price: 0, cost: Math.round(cn * 100) / 100 });
+    p.stock = Math.round(tot * 1000) / 1000; sum += l.qty * l.cost;
+    items.push({ pid: p.id, name: p.name, qty: l.qty, price: 0, cost: Math.round(cn * 100) / 100, ins: !!l.ins });
   }
   recosto(s);
   const { total, iva } = calcIva(sum, ivaPct, ivaInc);
@@ -131,7 +136,10 @@ export function anular(s: S, id: number): string | null {
   if (!t || t.void) return 'La operación no existe o ya está anulada.';
   if (t.paidBy) return `Primero anulá el cobro/pago #${t.paidBy} que la liquidó.`;
   if (t.type === 'SALE') t.items.forEach(i => { const p = prod(s, i.pid); if (p) mueve(s, p, i.qty); });
-  else if (t.type === 'PURCHASE') t.items.forEach(i => { const p = prod(s, i.pid); if (p) p.stock = Math.max(0, p.stock - i.qty); });
+  else if (t.type === 'PURCHASE') t.items.forEach(i => {
+    const p = i.ins ? s.insumos.find(x => x.id === i.pid) : prod(s, i.pid);
+    if (p) p.stock = Math.max(0, Math.round((p.stock - i.qty) * 1000) / 1000);
+  });
   else if (t.type === 'COLLECTION' || t.type === 'PAYMENT') {
     const o = s.txs.find(x => x.id === t.pays);
     if (o) { o.status = 'PENDING'; o.paidBy = undefined; }
@@ -172,6 +180,69 @@ export function anularMov(s: S, id: number): string | null {
   if (!m || m.void) return 'El movimiento no existe o ya está anulado.';
   if (!abierta(s) || m.turno !== turnoActual(s).id) return 'Solo se anulan movimientos del turno abierto.';
   m.void = true; return null;
+}
+
+/* ───────── Insumos y recetas ───────── */
+const r3 = (x: number) => Math.round(x * 1000) / 1000;
+
+export function nuevoInsumo(s: S, name: string, unit: string, cost: number, stock: number, min: number): string | null {
+  if (!name.trim()) return 'Poné un nombre al insumo.';
+  if (s.insumos.some(i => i.name.toLowerCase() === name.trim().toLowerCase())) return 'Ya existe un insumo con ese nombre.';
+  if (cost < 0 || stock < 0 || min < 0) return 'Costo, stock y mínimo no pueden ser negativos.';
+  s.insumos.push({ id: Math.max(0, ...s.insumos.map(i => i.id)) + 1, name: name.trim(), unit: unit.trim() || 'u', cost, stock, min });
+  return null;
+}
+
+export function costoReceta(s: S, r: Pick<Receta, 'ins' | 'mo' | 'cf' | 'merma' | 'lote'>) {
+  const ins = r.ins.reduce((a, l) => a + l.qty * (s.insumos.find(i => i.id === l.iid)?.cost ?? 0), 0);
+  const merma = ins * r.merma / 100;
+  const total = ins + r.mo + r.cf + merma;
+  return { ins, mo: r.mo, cf: r.cf, merma, total, unit: r.lote > 0 ? total / r.lote : 0 };
+}
+
+export function nuevaReceta(s: S, name: string, lote: number, unidad: string, ins: RLn[], mo: number, cf: number, merma: number): string | null {
+  if (!name.trim()) return 'Poné un nombre a la receta.';
+  if (!(lote > 0)) return 'La cantidad por lote debe ser mayor a 0.';
+  if (!ins.length) return 'Agregá al menos un insumo.';
+  if (mo < 0 || cf < 0 || merma < 0) return 'Mano de obra, costos fijos y merma no pueden ser negativos.';
+  let p = s.prods.find(x => x.name.toLowerCase() === name.trim().toLowerCase());
+  if (p?.combo) return 'Ese nombre corresponde a un combo.';
+  if (p && s.recetas.some(r => r.pid === p!.id)) return 'Ya hay una receta para ese producto.';
+  const rec = { ins, mo, cf, merma, lote };
+  const unit = Math.round(costoReceta(s, rec).unit * 100) / 100;
+  if (!p) {
+    p = { id: Math.max(0, ...s.prods.map(x => x.id)) + 1, name: name.trim(), stock: 0, min: 0, cost: unit, price: 0 };
+    s.prods.push(p);
+  }
+  if (p.stock === 0) p.cost = unit;
+  if (p.price <= 0) p.price = calcPrecio(unit, s.cfg.mv, s.cfg, selDefault)?.lista ?? unit * 2;
+  s.recetas.push({ id: Math.max(0, ...s.recetas.map(r => r.id)) + 1, name: name.trim(), lote, unidad: unidad.trim() || 'Unidad', ins, mo, cf, merma, pid: p.id });
+  return null;
+}
+
+export function fabricar(s: S, rid: number, qty: number, descontar: boolean): string | null {
+  const r = s.recetas.find(x => x.id === rid);
+  if (!r) return 'Elegí una receta.';
+  if (!(qty > 0)) return 'La cantidad a fabricar debe ser mayor a 0.';
+  const p = prod(s, r.pid);
+  if (!p) return 'El producto de esta receta ya no existe.';
+  const k = qty / r.lote;
+  if (descontar) for (const l of r.ins) {
+    const i = s.insumos.find(x => x.id === l.iid);
+    if (!i) return 'Un insumo de la receta ya no existe.';
+    if (i.stock < l.qty * k - 1e-9) return `Falta ${i.name}: hay ${i.stock} ${i.unit} y se necesitan ${r3(l.qty * k)}.`;
+  }
+  const unit = costoReceta(s, r).unit;
+  if (descontar) r.ins.forEach(l => { const i = s.insumos.find(x => x.id === l.iid)!; i.stock = Math.max(0, r3(i.stock - l.qty * k)); });
+  const tot = p.stock + qty;
+  p.cost = Math.round(((p.stock * p.cost + qty * unit) / tot) * 100) / 100; // costo promedio ponderado
+  p.stock = tot;
+  s.fabs.push({ id: s.fabs.length + 1, rid, qty, at: now(), costoU: Math.round(unit * 100) / 100, desc: descontar });
+  recosto(s); return null;
+}
+
+export function eliminarReceta(s: S, id: number): string | null {
+  s.recetas = s.recetas.filter(r => r.id !== id); return null;
 }
 
 /* ───────── Combos / ofertas ───────── */
@@ -232,6 +303,13 @@ export const por = (s: S, tipos: Tipo[]) => s.txs.filter(t => !t.void && t.statu
 export function seed(): S {
   const s: S = { seq: 0, cfg: cfgDefault(), neg: { nombre: '', cuit: '', tel: '', dir: '', email: '' }, caja0: 60000, banco0: 600000, txs: [],
     turnos: [], movs: [],
+    insumos: [
+      { id: 1, name: 'Harina 000', unit: 'kg', stock: 25, min: 10, cost: 900 },
+      { id: 2, name: 'Manteca', unit: 'kg', stock: 8, min: 3, cost: 7500 },
+      { id: 3, name: 'Azúcar', unit: 'kg', stock: 12, min: 5, cost: 1100 }],
+    recetas: [{ id: 1, name: 'Medialuna', lote: 12, unidad: 'Unidad', pid: 1, mo: 2000, cf: 500, merma: 5,
+      ins: [{ iid: 1, qty: 0.6 }, { iid: 2, qty: 0.3 }, { iid: 3, qty: 0.05 }] }],
+    fabs: [],
     medios: [{ name: 'Efectivo', tipo: 'caja' }, { name: 'Mercado Pago', tipo: 'banco' },
       { name: 'Transferencia Bancaria', tipo: 'banco' }, { name: 'Fiado / Cta Corriente', tipo: 'credito' }],
     prods: [
