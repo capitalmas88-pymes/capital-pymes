@@ -301,13 +301,37 @@ export function pyl(s: S, f: (d: Date) => boolean) {
 export const por = (s: S, tipos: Tipo[]) => s.txs.filter(t => !t.void && t.status === 'PENDING' && tipos.includes(t.type));
 
 export function seed(): S {
-  return {
-    seq: 0, cfg: cfgDefault(), neg: { nombre: '', cuit: '', tel: '', dir: '', email: '' }, caja0: 0, banco0: 0, txs: [],
-    turnos: [{ id: 1, abre: now(), nota: 'Apertura inicial', inicial: {} }], movs: [],
-    insumos: [], recetas: [], fabs: [],
+  const s: S = { seq: 0, cfg: cfgDefault(), neg: { nombre: '', cuit: '', tel: '', dir: '', email: '' }, caja0: 60000, banco0: 600000, txs: [],
+    turnos: [], movs: [],
+    insumos: [
+      { id: 1, name: 'Harina 000', unit: 'kg', stock: 25, min: 10, cost: 900 },
+      { id: 2, name: 'Manteca', unit: 'kg', stock: 8, min: 3, cost: 7500 },
+      { id: 3, name: 'Azúcar', unit: 'kg', stock: 12, min: 5, cost: 1100 }],
+    recetas: [{ id: 1, name: 'Medialuna', lote: 12, unidad: 'Unidad', pid: 1, mo: 2000, cf: 500, merma: 5,
+      ins: [{ iid: 1, qty: 0.6 }, { iid: 2, qty: 0.3 }, { iid: 3, qty: 0.05 }] }],
+    fabs: [],
     medios: [{ name: 'Efectivo', tipo: 'caja' }, { name: 'Mercado Pago', tipo: 'banco' },
       { name: 'Transferencia Bancaria', tipo: 'banco' }, { name: 'Fiado / Cta Corriente', tipo: 'credito' }],
-    prods: [] };
+    prods: [
+      { id: 1, name: 'Medialuna', stock: 36, min: 12, cost: 350, price: 900 },
+      { id: 2, name: 'Tostado J&Q', stock: 15, min: 6, cost: 1600, price: 4200 },
+      { id: 3, name: 'Café con leche', stock: 50, min: 15, cost: 700, price: 2800 },
+      { id: 4, name: 'Alfajor', stock: 30, min: 10, cost: 700, price: 1300 },
+      { id: 5, name: 'Gaseosa 500ml', stock: 10, min: 12, cost: 1100, price: 2000 },
+      { id: 6, name: 'Agua mineral 500ml', stock: 24, min: 12, cost: 600, price: 1400 }] };
+  const ago = (h: number) => new Date(Date.now() - h * 36e5).toISOString();
+  const day = (n: number) => new Date(Date.now() + n * 864e5).toISOString().slice(0, 10);
+  s.turnos.push({ id: 1, abre: ago(100), nota: 'Apertura inicial', inicial: { Efectivo: s.caja0, 'Mercado Pago': s.banco0 } });
+  gasto(s, [{ cat: 'Alquiler', desc: 'Alquiler del local', monto: 350000 }], 'Transferencia Bancaria', 'PAID', undefined, 'Inmobiliaria Centro', 0, false, ago(48));
+  compra(s, [{ pid: 4, qty: 24, cost: 700 }], 'Fiado / Cta Corriente', 'PENDING', day(10), 'Distribuidora Sur', 21, false, ago(24));
+  venta(s, { 2: 5, 3: 5 }, 'Fiado / Cta Corriente', 'PENDING', day(-1), 'Oficina García', 0, ago(72));
+  venta(s, { 3: 2, 1: 4 }, 'Efectivo', 'PAID', undefined, '', 0, ago(26));
+  venta(s, { 3: 1, 1: 2 }, 'Efectivo', 'PAID', undefined, '', 0, ago(5));
+  venta(s, { 2: 2, 6: 2 }, 'Mercado Pago', 'PAID', undefined, '', 0, ago(4));
+  venta(s, { 5: 3, 4: 3 }, 'Efectivo', 'PAID', undefined, '', 0, ago(3));
+  venta(s, { 3: 4, 1: 6 }, 'Fiado / Cta Corriente', 'PENDING', day(7), 'Estudio Pérez', 0, ago(2));
+  gasto(s, [{ cat: 'Servicios', desc: 'Luz y gas', monto: 18500 }], 'Efectivo', 'PAID', undefined, '', 21, true, ago(1));
+  return s;
 }
 
 export function ivaRes(s: S, f: (d: Date) => boolean) {
