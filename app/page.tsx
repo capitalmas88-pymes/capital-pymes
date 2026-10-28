@@ -1,11 +1,11 @@
 'use client';
 import { ReactNode, useEffect, useState } from 'react';
-import { CUOTAS, Cfg, GLn, Ln, REDONDEOS, S, Sel, calcPrecio, selDefault, St, Tx, abierta, anular, calcIva, compra, flows, ivaRes, gasto, liquidar, money, nuevoProd, por, pyl, saldos, seed, stk, venta } from '../lib/engine';
+import { CUOTAS, Cfg, GLn, Ln, REDONDEOS, RLn, S, Sel, calcPrecio, selDefault, St, Tx, abierta, anular, calcIva, compra, costoReceta, eliminarReceta, fabricar, flows, ivaRes, gasto, liquidar, money, nuevaReceta, nuevoInsumo, nuevoProd, por, pyl, saldos, seed, stk, venta } from '../lib/engine';
 import { Apertura, Cierre, Combos, EstadoCaja, Movs } from './Extras';
 
 const MESES = ['Ene', 'Feb', 'Mar', 'Abr', 'May', 'Jun', 'Jul', 'Ago', 'Sep', 'Oct', 'Nov', 'Dic'];
 const CATS = ['Alquiler', 'Sueldos', 'Servicios', 'Impuestos', 'Marketing', 'Mantenimiento', 'Otros'];
-const SECC = { A: '⚡ Registradora exprés', B: '📦 Inventario y costos', C: '🧾 Historial', D: '📊 Estados financieros', E: '⚙️ Configuración' } as const;
+const SECC = { A: '⚡ Registradora exprés', B: '📦 Inventario y costos', F: '📋 Recetas y fabricación', C: '🧾 Historial', D: '📊 Estados financieros', E: '⚙️ Configuración' } as const;
 type Act = (fn: (n: S) => string | null, ok: string) => boolean;
 type Msg = { k: 'ok' | 'err'; t: string } | null;
 const fecha = (iso: string) => new Date(iso).toLocaleString('es-AR', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' });
@@ -80,24 +80,33 @@ function Totales({ sub, pct, inc }: { sub: number; pct: number; inc: boolean }) 
 function Compra({ s, act }: { s: S; act: Act }) {
   const comprables = s.prods.filter(p => !p.combo);
   const [lines, setLines] = useState<Ln[]>([]); const [prov, setProv] = useState('');
+  const [esIns, setEs] = useState(false);
+  const lista = esIns ? s.insumos : comprables;
   const [pid, setPid] = useState(comprables[0]?.id ?? 0); const [qty, setQty] = useState(1); const [costo, setCosto] = useState(0);
+  const cambiar = (v: boolean) => { setEs(v); setPid((v ? s.insumos : comprables)[0]?.id ?? 0); };
+  const nom = (l: Ln) => (l.ins ? s.insumos.find(i => i.id === l.pid) : s.prods.find(p => p.id === l.pid))?.name;
   const pg = usePago(s); const iv = useIva();
   const sub = lines.reduce((a, l) => a + l.qty * l.cost, 0);
   return (<>
-    <h3>Agregar productos al detalle</h3>
+    <div className="pills">
+      <button className={!esIns ? 'on' : ''} onClick={() => cambiar(false)}>📦 Productos</button>
+      <button className={esIns ? 'on' : ''} onClick={() => cambiar(true)}>🧂 Insumos</button></div>
+    <h3>Agregar {esIns ? 'insumos' : 'productos'} al detalle</h3>
+    {!lista.length && <p className="mut">{esIns ? 'Primero creá insumos en Inventario y costos.' : 'No hay productos.'}</p>}
     <div className="form">
-      <label>Producto<select value={pid} onChange={e => setPid(+e.target.value)}>{comprables.map(p => <option key={p.id} value={p.id}>{p.name} (stock {p.stock})</option>)}</select></label>
-      <label>Cantidad<input type="number" min={1} value={qty} onChange={e => setQty(+e.target.value)} /></label>
+      <label>{esIns ? 'Insumo' : 'Producto'}<select value={pid} onChange={e => setPid(+e.target.value)}>
+        {lista.map(p => <option key={p.id} value={p.id}>{p.name} (stock {p.stock}{'unit' in p ? ' ' + p.unit : ''})</option>)}</select></label>
+      <label>Cantidad<input type="number" min={0} step="any" value={qty} onChange={e => setQty(+e.target.value)} /></label>
       <label>Costo unitario<input type="number" min={0} value={costo} onChange={e => setCosto(+e.target.value)} /></label>
-      <div style={{ alignSelf: 'end' }}><button disabled={qty <= 0} onClick={() => { setLines([...lines, { pid, qty, cost: costo }]); setQty(1); setCosto(0); }}>➕ Agregar</button></div></div>
+      <div style={{ alignSelf: 'end' }}><button disabled={qty <= 0 || !pid} onClick={() => { setLines([...lines, { pid, qty, cost: costo, ins: esIns }]); setQty(1); setCosto(0); }}>➕ Agregar</button></div></div>
     <h3>Detalle de la compra</h3>
-    {!lines.length && <p className="mut">Agregá uno o más productos antes de registrar.</p>}
-    {lines.map((l, i) => (<div className="row" key={i}><span><b>{l.qty}×</b> {s.prods.find(p => p.id === l.pid)?.name}</span>
+    {!lines.length && <p className="mut">Agregá uno o más productos o insumos antes de registrar.</p>}
+    {lines.map((l, i) => (<div className="row" key={i}><span><b>{l.qty}×</b> {l.ins ? '🧂 ' : ''}{nom(l)}</span>
       <span>{money(l.qty * l.cost)} <button onClick={() => setLines(lines.filter((_, k) => k !== i))}>✕</button></span></div>))}
     {!!lines.length && <Totales sub={sub} pct={iv.pct} inc={iv.inc} />}
     <div className="form"><label>Proveedor<input value={prov} onChange={e => setProv(e.target.value)} placeholder="Ej: Distribuidora Sur" /></label>{pg.ui}{iv.ui}</div>
     <button className="p" disabled={!lines.length} onClick={() => { if (act(n => compra(n, lines, pg.medio, pg.estado, pg.vence, prov.trim(), iv.pct, iv.inc), 'Compra registrada.')) { setLines([]); setProv(''); } }}>Registrar compra</button>
-    <p className="mut">Suma stock y recalcula el costo promedio ponderado. Con IVA incluido, el costo del producto se guarda sin IVA.</p></>);
+    <p className="mut">Suma stock y recalcula el costo promedio ponderado. Los insumos suman al stock de insumos. Con IVA incluido, el costo se guarda sin IVA.</p></>);
 }
 
 function Gasto({ s, act }: { s: S; act: Act }) {
@@ -156,6 +165,25 @@ function ModA({ s, act }: { s: S; act: Act }) {
     {v === 'mov' && <Movs s={s} act={act} />}</div>);
 }
 
+function Insumos({ s, act }: { s: S; act: Act }) {
+  const v0 = { name: '', unit: 'kg', cost: 0, stock: 0, min: 0 };
+  const [f, setF] = useState(v0);
+  const set = (k: keyof typeof f, v: string) => setF({ ...f, [k]: k === 'name' || k === 'unit' ? v : +v });
+  return (<div className="box" style={{ marginTop: 14 }}><h3>🧂 Stock de insumos</h3><div className="grid">
+    <div className="scroll"><table><thead><tr><th>Insumo</th><th>Stock</th><th>Mín.</th><th>Costo / unidad</th><th>Valor</th></tr></thead><tbody>
+      {s.insumos.map(i => { const bajo = i.stock < i.min; return (<tr key={i.id} className={bajo ? 'neg' : ''}>
+        <td>{i.name}</td><td>{bajo ? '⚠️ ' : ''}{i.stock} {i.unit}</td><td>{i.min}</td><td>{money(i.cost)}</td><td>{money(i.stock * i.cost)}</td></tr>); })}</tbody></table>
+      {!s.insumos.length && <p className="mut">Todavía no cargaste insumos.</p>}</div>
+    <div><h3>Nuevo insumo</h3><div className="form">
+      <label>Nombre<input value={f.name} onChange={e => set('name', e.target.value)} placeholder="Ej: Harina 000" /></label>
+      <label>Unidad<input value={f.unit} onChange={e => set('unit', e.target.value)} placeholder="kg, lt, u…" /></label>
+      <label>Costo por unidad<input type="number" value={f.cost} onChange={e => set('cost', e.target.value)} /></label>
+      <label>Stock inicial<input type="number" step="any" value={f.stock} onChange={e => set('stock', e.target.value)} /></label>
+      <label>Stock mínimo<input type="number" step="any" value={f.min} onChange={e => set('min', e.target.value)} /></label></div>
+      <button className="p" onClick={() => { if (act(n => nuevoInsumo(n, f.name, f.unit, f.cost, f.stock, f.min), `Insumo «${f.name.trim()}» creado.`)) setF(v0); }}>Crear insumo</button></div>
+  </div></div>);
+}
+
 function ModB({ s, act }: { s: S; act: Act }) {
   const [f, setF] = useState({ name: '', price: 0, cost: 0, stock: 0, min: 5 });
   const set = (k: keyof typeof f, v: string) => setF({ ...f, [k]: k === 'name' ? v : +v });
@@ -172,6 +200,7 @@ function ModB({ s, act }: { s: S; act: Act }) {
       <label>Stock mínimo<input type="number" value={f.min} onChange={e => set('min', e.target.value)} /></label></div>
       <button className="p" onClick={() => { if (act(n => nuevoProd(n, f.name, f.price, f.cost, f.stock, f.min), `Producto «${f.name.trim()}» creado.`)) setF({ name: '', price: 0, cost: 0, stock: 0, min: 5 }); }}>Crear producto</button></div>
   </div></div>
+    <Insumos s={s} act={act} />
     <Combos s={s} act={act} />
     <Calc s={s} act={act} /></>);
 }
@@ -309,6 +338,90 @@ function Config({ s, act }: { s: S; act: Act }) {
       <p className="mut">«Recalcular» usa el margen de venta guardado, Ing. Brutos y retenciones. Guardá la configuración primero.</p></div></div>);
 }
 
+/* ───────── Recetas y fabricación ───────── */
+function Recetas({ s, act }: { s: S; act: Act }) {
+  const [v, setV] = useState('nueva');
+  const tabs = { nueva: '📝 Nueva receta', fab: '🏭 Fabricar', rec: '📖 Recetario' };
+  return (<div className="box"><h3>📋 Recetas y fabricación</h3>
+    <div className="pills">{Object.entries(tabs).map(([k, l]) => <button key={k} className={v === k ? 'on' : ''} onClick={() => setV(k)}>{l}</button>)}</div>
+    {v === 'nueva' && <NuevaReceta s={s} act={act} />}{v === 'fab' && <Fabricar s={s} act={act} />}{v === 'rec' && <Recetario s={s} act={act} />}</div>);
+}
+
+function NuevaReceta({ s, act }: { s: S; act: Act }) {
+  const [name, setName] = useState(''); const [lote, setLote] = useState(12); const [unidad, setUnidad] = useState('Unidad');
+  const [ins, setIns] = useState<RLn[]>([]); const [iid, setIid] = useState(s.insumos[0]?.id ?? 0); const [cant, setCant] = useState(0);
+  const [mo, setMo] = useState(0); const [cfMes, setCfMes] = useState(0); const [hMes, setHMes] = useState(200); const [hLote, setHLote] = useState(1);
+  const [merma, setMerma] = useState(0);
+  const cf = hMes > 0 ? cfMes / hMes * hLote : 0;
+  const c = costoReceta(s, { ins, mo, cf, merma, lote });
+  const reset = () => { setName(''); setIns([]); setCant(0); setMo(0); setCfMes(0); setMerma(0); };
+  return (<div className="grid"><div>
+    <div className="form">
+      <label>Nombre de la receta *<input value={name} onChange={e => setName(e.target.value)} placeholder="Ej: Medialunas de manteca" /></label>
+      <label>Cantidad por lote (rinde)<input type="number" min={1} value={lote} onChange={e => setLote(+e.target.value)} /></label>
+      <label>Unidad de venta<input value={unidad} onChange={e => setUnidad(e.target.value)} /></label></div>
+    <h3>Insumos utilizados</h3>
+    {!s.insumos.length && <p className="mut">Creá insumos primero en Inventario y costos.</p>}
+    <div className="form">
+      <label>Insumo<select value={iid} onChange={e => setIid(+e.target.value)}>{s.insumos.map(i => <option key={i.id} value={i.id}>{i.name} ({i.unit})</option>)}</select></label>
+      <label>Cantidad por lote<input type="number" min={0} step="any" value={cant} onChange={e => setCant(+e.target.value)} /></label>
+      <div style={{ alignSelf: 'end' }}><button disabled={!iid || cant <= 0 || ins.some(l => l.iid === iid)} onClick={() => { setIns([...ins, { iid, qty: cant }]); setCant(0); }}>➕ Agregar insumo</button></div></div>
+    {ins.map((l, i) => { const x = s.insumos.find(q => q.id === l.iid); return (<div className="row" key={l.iid}>
+      <span><b>{l.qty} {x?.unit}</b> {x?.name}</span><span>{money(l.qty * (x?.cost ?? 0))} <button onClick={() => setIns(ins.filter((_, k) => k !== i))}>✕</button></span></div>); })}
+    <h3>Mano de obra, costos fijos y merma</h3>
+    <div className="form">
+      <label>Mano de obra del lote $<input type="number" min={0} value={mo} onChange={e => setMo(+e.target.value)} /></label>
+      <label>Costos fijos del mes $<input type="number" min={0} value={cfMes} onChange={e => setCfMes(+e.target.value)} /></label>
+      <label>Horas al mes abierto<input type="number" min={1} value={hMes} onChange={e => setHMes(+e.target.value)} /></label>
+      <label>Horas para este lote<input type="number" min={0} step="any" value={hLote} onChange={e => setHLote(+e.target.value)} /></label>
+      <label>Merma % (sobre insumos)<input type="number" min={0} value={merma} onChange={e => setMerma(+e.target.value)} /></label></div>
+  </div>
+  <div>
+    <h3>Resumen de costos</h3>
+    <div className="row"><span className="mut">Insumos (lote)</span><span>{money(c.ins)}</span></div>
+    <div className="row"><span className="mut">Mano de obra</span><span>{money(c.mo)}</span></div>
+    <div className="row"><span className="mut">Costos fijos asignados</span><span>{money(c.cf)}</span></div>
+    <div className="row"><span className="mut">Merma</span><span>{money(c.merma)}</span></div>
+    <div className="row"><span className="mut">Costo total del lote</span><strong>{money(c.total)}</strong></div>
+    <div className="row"><span className="mut">Costo por {unidad.toLowerCase() || 'unidad'}</span><strong style={{ fontSize: 24 }}>{money(c.unit)}</strong></div>
+    <button className="p" onClick={() => { if (act(n => nuevaReceta(n, name, lote, unidad, ins, mo, cf, merma), `Receta «${name.trim()}» guardada y producto creado en stock.`)) reset(); }}>💾 Guardar receta</button>
+    <p className="mut">Crea el producto terminado (con stock 0) o lo vincula si ya existe. El stock se suma al fabricar.</p>
+  </div></div>);
+}
+
+function Fabricar({ s, act }: { s: S; act: Act }) {
+  const [rid, setRid] = useState(s.recetas[0]?.id ?? 0); const [qty, setQty] = useState(1); const [desc, setDesc] = useState(true);
+  const r = s.recetas.find(x => x.id === rid) ?? s.recetas[0];
+  if (!s.recetas.length) return <p className="mut">Primero guardá una receta.</p>;
+  const c = r ? costoReceta(s, r) : null;
+  return (<div className="grid"><div>
+    <div className="form">
+      <label>Receta<select value={r?.id ?? 0} onChange={e => setRid(+e.target.value)}>{s.recetas.map(x => <option key={x.id} value={x.id}>{x.name}</option>)}</select></label>
+      <label>Unidad de venta<input readOnly value={r?.unidad ?? ''} /></label>
+      <label>Costo unitario<input readOnly value={c ? money(c.unit) : ''} /></label>
+      <label>Cantidad a fabricar<input type="number" min={1} value={qty} onChange={e => setQty(+e.target.value)} /></label>
+      <label>Descontar insumos del stock<select value={desc ? '1' : '0'} onChange={e => setDesc(e.target.value === '1')}>
+        <option value="1">Sí, descontar insumos</option><option value="0">No descontar</option></select></label></div>
+    <button className="p" onClick={() => act(n => fabricar(n, r!.id, qty, desc), `Fabricación registrada: +${qty} ${r?.name}.`)}>🏭 Registrar fabricación en stock</button></div>
+    <div><h3>Insumos necesarios</h3>
+      {r && r.ins.map(l => { const i = s.insumos.find(x => x.id === l.iid); const need = Math.round(l.qty * qty / r.lote * 1000) / 1000; const falta = !!i && i.stock < need;
+        return (<div className="row" key={l.iid}><span>{i?.name}</span><span className={falta ? 'neg' : ''}>{need} {i?.unit} (hay {i?.stock}){falta ? ' ⚠️' : ''}</span></div>); })}
+      {r && <p className="mut">Stock actual de «{r.name}»: {s.prods.find(p => p.id === r.pid)?.stock ?? 0}</p>}</div></div>);
+}
+
+function Recetario({ s, act }: { s: S; act: Act }) {
+  return (<div>
+    {!s.recetas.length && <p className="mut">No hay recetas guardadas.</p>}
+    {s.recetas.map(r => { const c = costoReceta(s, r); return (<div className="box" key={r.id} style={{ marginTop: 10 }}>
+      <div className="row"><h3>{r.name}</h3><button onClick={() => act(n => eliminarReceta(n, r.id), 'Receta eliminada.')}>Eliminar</button></div>
+      <p className="mut">Rinde {r.lote} {r.unidad.toLowerCase()} · Lote {money(c.total)} · <b>{money(c.unit)} c/u</b></p>
+      {r.ins.map(l => { const i = s.insumos.find(x => x.id === l.iid); return <div className="row" key={l.iid}><span>{i?.name ?? '(insumo eliminado)'}</span><span>{l.qty} {i?.unit}</span></div>; })}</div>); })}
+    {!!s.fabs.length && <><h3 style={{ marginTop: 18 }}>Últimas fabricaciones</h3>
+      {[...s.fabs].reverse().slice(0, 10).map(f => <div className="row" key={f.id}>
+        <span>{fecha(f.at)} · {s.recetas.find(r => r.id === f.rid)?.name ?? 'Receta eliminada'}</span><span>+{f.qty} · {money(f.costoU)} c/u{f.desc ? '' : ' (sin descontar)'}</span></div>)}</>}
+  </div>);
+}
+
 export default function Page() {
   const [s, setS] = useState<S | null>(null); const [tab, setTab] = useState<keyof typeof SECC>('A'); const [msg, setMsg] = useState<Msg>(null);
   useEffect(() => { setS(seed()); }, []);
@@ -320,7 +433,8 @@ export default function Page() {
     setS(n); setMsg({ k: 'ok', t: ok }); return true;
   };
   const h = new Date(), mes = pyl(s, d => d.getMonth() === h.getMonth() && d.getFullYear() === h.getFullYear());
-  const { caja, banco } = saldos(s); const bajos = s.prods.filter(p => stk(s, p) < p.min).length;
+  const { caja, banco } = saldos(s);
+  const bajos = s.prods.filter(p => stk(s, p) < p.min).length + s.insumos.filter(i => i.stock < i.min).length;
   return (<div className="wrap">
     <div className="top"><div className="brand">🏢 {s.neg.nombre || <>Capital<b>+</b> PyMEs</>}</div>
       <span><span className="mut">🧪 Modo simulación: los datos no se guardan </span><button onClick={() => { setS({ ...seed(), neg: s.neg, cfg: s.cfg }); setMsg({ k: 'ok', t: 'Datos de ejemplo reiniciados.' }); }}>Reiniciar</button></span></div>
@@ -330,6 +444,6 @@ export default function Page() {
       <div className="kpi"><small>📦 Stock crítico</small><strong className={bajos ? 'neg' : ''}>{bajos}</strong></div>
       <div className="kpi"><small>📊 Resultado neto del mes</small><strong className={mes.neta < 0 ? 'neg' : 'pos'}>{money(mes.neta)}</strong></div></div>
     <div className="nav">{(Object.keys(SECC) as (keyof typeof SECC)[]).map(k => <button key={k} className={tab === k ? 'on' : ''} onClick={() => setTab(k)}>{SECC[k]}</button>)}</div>
-    {tab === 'A' && <ModA s={s} act={act} />}{tab === 'B' && <ModB s={s} act={act} />}{tab === 'C' && <ModC s={s} act={act} />}{tab === 'D' && <ModD s={s} />}{tab === 'E' && <Config s={s} act={act} />}
+    {tab === 'A' && <ModA s={s} act={act} />}{tab === 'B' && <ModB s={s} act={act} />}{tab === 'F' && <Recetas s={s} act={act} />}{tab === 'C' && <ModC s={s} act={act} />}{tab === 'D' && <ModD s={s} />}{tab === 'E' && <Config s={s} act={act} />}
     {msg && <div className={'toast ' + (msg.k === 'err' ? 'err' : '')}>{msg.t}</div>}</div>);
 }
