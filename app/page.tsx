@@ -82,8 +82,17 @@ function Compra({ s, act }: { s: S; act: Act }) {
   const [lines, setLines] = useState<Ln[]>([]); const [prov, setProv] = useState('');
   const [esIns, setEs] = useState(false);
   const lista: (Prod | Insumo)[] = esIns ? s.insumos : comprables;
-  const [pid, setPid] = useState(comprables[0]?.id ?? 0); const [qty, setQty] = useState(1); const [costo, setCosto] = useState(0);
-  const cambiar = (v: boolean) => { setEs(v); setPid((v ? s.insumos : comprables)[0]?.id ?? 0); };
+  const [pid0, setPid] = useState(0); const [qty, setQty] = useState(1); const [costo, setCosto] = useState(0);
+  const pid = lista.some(p => p.id === pid0) ? pid0 : lista[0]?.id ?? 0;
+  const [nuevo, setNuevo] = useState(false); const [nn, setNn] = useState(''); const [np, setNp] = useState(0); const [nu, setNu] = useState('kg');
+  const cambiar = (v: boolean) => { setEs(v); setPid(0); setNuevo(false); };
+  const crear = () => {
+    const nid = Math.max(0, ...(esIns ? s.insumos : s.prods).map(p => p.id)) + 1;
+    const ok = esIns
+      ? act(n => nuevoInsumo(n, nn, nu, 0, 0, 0), `Insumo «${nn.trim()}» creado.`)
+      : act(n => nuevoProd(n, nn, np, 0, 0, 0), `Producto «${nn.trim()}» creado.`);
+    if (ok) { setPid(nid); setNuevo(false); setNn(''); setNp(0); }
+  };
   const nom = (l: Ln) => (l.ins ? s.insumos.find(i => i.id === l.pid) : s.prods.find(p => p.id === l.pid))?.name;
   const pg = usePago(s); const iv = useIva();
   const sub = lines.reduce((a, l) => a + l.qty * l.cost, 0);
@@ -92,13 +101,20 @@ function Compra({ s, act }: { s: S; act: Act }) {
       <button className={!esIns ? 'on' : ''} onClick={() => cambiar(false)}>📦 Productos</button>
       <button className={esIns ? 'on' : ''} onClick={() => cambiar(true)}>🧂 Insumos</button></div>
     <h3>Agregar {esIns ? 'insumos' : 'productos'} al detalle</h3>
-    {!lista.length && <p className="mut">{esIns ? 'Primero creá insumos en Inventario y costos.' : 'No hay productos.'}</p>}
+    {!lista.length && <p className="mut">{esIns ? 'Todavía no hay insumos. Creá el primero con «Crear nuevo».' : 'Todavía no hay productos. Creá el primero con «Crear nuevo».'}</p>}
     <div className="form">
       <label>{esIns ? 'Insumo' : 'Producto'}<select value={pid} onChange={e => setPid(+e.target.value)}>
         {lista.map(p => <option key={p.id} value={p.id}>{p.name} (stock {p.stock}{'unit' in p ? ' ' + p.unit : ''})</option>)}</select></label>
       <label>Cantidad<input type="number" min={0} step="any" value={qty} onChange={e => setQty(+e.target.value)} /></label>
       <label>Costo unitario<input type="number" min={0} value={costo} onChange={e => setCosto(+e.target.value)} /></label>
       <div style={{ alignSelf: 'end' }}><button disabled={qty <= 0 || !pid} onClick={() => { setLines([...lines, { pid, qty, cost: costo, ins: esIns }]); setQty(1); setCosto(0); }}>➕ Agregar</button></div></div>
+    <div className="pills"><button onClick={() => setNuevo(!nuevo)}>{nuevo ? '✖ Cancelar' : `✨ Crear ${esIns ? 'insumo' : 'producto'} nuevo`}</button></div>
+    {nuevo && <div className="form">
+      <label>Nombre<input value={nn} onChange={e => setNn(e.target.value)} placeholder={esIns ? 'Ej: Harina 000' : 'Ej: Medialuna'} /></label>
+      {esIns
+        ? <label>Unidad<input value={nu} onChange={e => setNu(e.target.value)} placeholder="kg, lt, u…" /></label>
+        : <label>Precio de venta<input type="number" min={0} value={np} onChange={e => setNp(+e.target.value)} /></label>}
+      <div style={{ alignSelf: 'end' }}><button className="p" disabled={!nn.trim() || (!esIns && !(np > 0))} onClick={crear}>💾 Crear</button></div></div>}
     <h3>Detalle de la compra</h3>
     {!lines.length && <p className="mut">Agregá uno o más productos o insumos antes de registrar.</p>}
     {lines.map((l, i) => (<div className="row" key={i}><span><b>{l.qty}×</b> {l.ins ? '🧂 ' : ''}{nom(l)}</span>
