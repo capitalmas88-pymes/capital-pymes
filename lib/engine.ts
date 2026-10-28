@@ -1,16 +1,46 @@
 export type Tipo = 'SALE' | 'PURCHASE' | 'EXPENSE' | 'COLLECTION' | 'PAYMENT';
 export type St = 'PAID' | 'PENDING';
-export type Prod = { id: number; name: string; stock: number; min: number; cost: number; price: number };
+export type Prod = { id: number; name: string; stock: number; min: number; cost: number; price: number;
+  combo?: { pid: number; qty: number }[]; notes?: string };
 export type Medio = { name: string; tipo: 'caja' | 'banco' | 'credito' };
 export type Item = { pid: number; name: string; qty: number; price: number; cost: number };
 export type Tx = { id: number; type: Tipo; desc: string; amount: number; costAmt: number; medio: string; status: St;
   due?: string; at: string; items: Item[]; void: boolean; paidBy?: number; pays?: number; disc: number; iva?: number; prov?: string };
-export type S = { prods: Prod[]; txs: Tx[]; medios: Medio[]; caja0: number; banco0: number; seq: number; cfg: Cfg; neg: Neg };
+export type Turno = { id: number; abre: string; cierra?: string; inicial: Record<string, number>; nota: string;
+  esperado?: Record<string, number>; contado?: Record<string, number>; cierreNota?: string };
+export type Mov = { id: number; turno: number; at: string; tipo: 'IN' | 'OUT'; medio: string; monto: number; desc: string; void: boolean };
+export type S = { prods: Prod[]; txs: Tx[]; medios: Medio[]; caja0: number; banco0: number; seq: number; cfg: Cfg; neg: Neg;
+  turnos: Turno[]; movs: Mov[] };
 
 export const money = (v: number) => (v < 0 ? '-' : '') + '$' + Math.abs(Math.round(v)).toLocaleString('es-AR');
 const now = () => new Date().toISOString();
 export const medioTipo = (s: S, n: string) => s.medios.find(m => m.name === n)?.tipo ?? 'banco';
 const prod = (s: S, id: number) => s.prods.find(p => p.id === id);
+
+const CERRADA = 'La caja está cerrada. Abrila en la pestaña Apertura.';
+export const turnoActual = (s: S) => s.turnos[s.turnos.length - 1];
+export const abierta = (s: S) => { const t = turnoActual(s); return !!t && !t.cierra; };
+
+// stock de un combo = cuántos combos se pueden armar con los componentes
+export const stk = (s: S, p: Prod): number => p.combo
+  ? Math.min(...p.combo.map(c => { const q = prod(s, c.pid); return q ? Math.floor(stk(s, q) / c.qty) : 0; }))
+  : p.stock;
+function mueve(s: S, p: Prod, d: number) {
+  if (p.combo) p.combo.forEach(c => { const q = prod(s, c.pid); if (q) mueve(s, q, d * c.qty); });
+  else p.stock = Math.max(0, p.stock + d);
+}
+function recosto(s: S) {
+  s.prods.forEach(p => { if (p.combo) p.cost = Math.round(p.combo.reduce((a, c) => a + c.qty * (prod(s, c.pid)?.cost ?? 0), 0) * 100) / 100; });
+}
+export function esperado(s: S, t: Turno) {
+  const r: Record<string, number> = {};
+  for (const m of s.medios) if (m.tipo !== 'credito') r[m.name] = t.inicial[m.name] ?? 0;
+  const a = +new Date(t.abre), z = t.cierra ? +new Date(t.cierra) : Infinity;
+  for (const f of flows(s)) if (+f.d >= a && +f.d <= z && f.m in r) r[f.m] += f.c === 'cobros' ? f.a : -f.a;
+  for (const m of s.movs) if (m.turno === t.id && !m.void && m.medio in r) r[m.medio] += m.tipo === 'IN' ? m.monto : -m.monto;
+  return r;
+}
+
 function push(s: S, t: Omit<Tx, 'id' | 'void'>, due?: string) {
   if (medioTipo(s, t.medio) === 'credito' && t.type !== 'COLLECTION' && t.type !== 'PAYMENT') t.status = 'PENDING';
   const x: Tx = { ...t, id: ++s.seq, void: false, due: t.status === 'PENDING' ? due : undefined };
@@ -30,18 +60,19 @@ const sfx = (pct: number, iva: number, inc: boolean, prov: string) =>
 
 export function venta(s: S, cart: Record<number, number>, medio: string, st: St, due: string | undefined,
   nota = '', pct = 0, at = now(), ivaPct = 0, ivaInc = false): string | null {
+  if (!abierta(s)) return CERRADA;
   const ids = Object.keys(cart).map(Number);
   if (!ids.length) return 'El ticket está vacío.';
   for (const id of ids) {
     const p = prod(s, id);
     if (!p) return 'Un producto del ticket ya no existe.';
-    if (p.stock < cart[id]) return `Stock insuficiente de ${p.name} (hay ${p.stock}).`;
+    if (stk(s, p) < cart[id]) return `Stock insuficiente de ${p.name} (hay ${stk(s, p)}).`;
   }
   const items: Item[] = []; let bruto = 0, costo = 0;
   for (const id of ids) {
     const p = prod(s, id)!, q = cart[id];
     items.push({ pid: id, name: p.name, qty: q, price: p.price, cost: p.cost });
-    bruto += q * p.price; costo += q * p.cost; p.stock -= q;
+    bruto += q * p.price; costo += q * p.cost; mueve(s, p, -q);
   }
   const disc = Math.round(bruto * Math.min(Math.max(pct, 0), 100)) / 100;
   const { total, iva } = calcIva(bruto - disc, ivaPct, ivaInc);
@@ -52,9 +83,12 @@ export function venta(s: S, cart: Record<number, number>, medio: string, st: St,
 
 export function compra(s: S, lines: Ln[], medio: string, st: St, due: string | undefined, prov = '',
   ivaPct = 0, ivaInc = false, at = now()): string | null {
+  if (!abierta(s)) return CERRADA;
   if (!lines.length) return 'El detalle de la compra está vacío.';
   for (const l of lines) {
-    if (!prod(s, l.pid)) return 'Producto inexistente.';
+    const pp = prod(s, l.pid);
+    if (!pp) return 'Producto inexistente.';
+    if (pp.combo) return 'Un combo no se compra: comprá sus productos.';
     if (l.qty <= 0 || l.cost < 0) return 'Cantidad y costo deben ser válidos.';
   }
   const f = ivaInc && ivaPct ? 1 / (1 + ivaPct / 100) : 1; // el costo del producto se guarda sin IVA
@@ -65,6 +99,7 @@ export function compra(s: S, lines: Ln[], medio: string, st: St, due: string | u
     p.stock = tot; sum += l.qty * l.cost;
     items.push({ pid: p.id, name: p.name, qty: l.qty, price: 0, cost: Math.round(cn * 100) / 100 });
   }
+  recosto(s);
   const { total, iva } = calcIva(sum, ivaPct, ivaInc);
   push(s, { type: 'PURCHASE', desc: items.map(i => `${i.qty}× ${i.name}`).join(', ') + ' (compra)' + sfx(ivaPct, iva, ivaInc, prov),
     amount: total, costAmt: 0, medio, status: st, at, items, disc: 0, iva, prov: prov || undefined }, due);
@@ -73,6 +108,7 @@ export function compra(s: S, lines: Ln[], medio: string, st: St, due: string | u
 
 export function gasto(s: S, lines: GLn[], medio: string, st: St, due: string | undefined, prov = '',
   ivaPct = 0, ivaInc = false, at = now()): string | null {
+  if (!abierta(s)) return CERRADA;
   if (!lines.length || lines.some(l => !(l.monto > 0))) return 'Cargá al menos un gasto con monto mayor a 0.';
   const { total, iva } = calcIva(lines.reduce((a, l) => a + l.monto, 0), ivaPct, ivaInc);
   push(s, { type: 'EXPENSE', desc: lines.map(l => (l.desc ? `${l.cat}: ${l.desc}` : l.cat)).join(' + ') + sfx(ivaPct, iva, ivaInc, prov),
@@ -81,6 +117,7 @@ export function gasto(s: S, lines: GLn[], medio: string, st: St, due: string | u
 }
 
 export function liquidar(s: S, id: number, medio: string): string | null {
+  if (!abierta(s)) return CERRADA;
   const o = s.txs.find(t => t.id === id);
   if (!o || o.void || o.status !== 'PENDING') return 'Esa cuenta ya no está pendiente.';
   const cobro = o.type === 'SALE';
@@ -93,7 +130,7 @@ export function anular(s: S, id: number): string | null {
   const t = s.txs.find(x => x.id === id);
   if (!t || t.void) return 'La operación no existe o ya está anulada.';
   if (t.paidBy) return `Primero anulá el cobro/pago #${t.paidBy} que la liquidó.`;
-  if (t.type === 'SALE') t.items.forEach(i => { const p = prod(s, i.pid); if (p) p.stock += i.qty; });
+  if (t.type === 'SALE') t.items.forEach(i => { const p = prod(s, i.pid); if (p) mueve(s, p, i.qty); });
   else if (t.type === 'PURCHASE') t.items.forEach(i => { const p = prod(s, i.pid); if (p) p.stock = Math.max(0, p.stock - i.qty); });
   else if (t.type === 'COLLECTION' || t.type === 'PAYMENT') {
     const o = s.txs.find(x => x.id === t.pays);
@@ -106,6 +143,50 @@ export function nuevoProd(s: S, name: string, price: number, cost: number, stock
   if (!name.trim() || price <= 0) return 'Completá el nombre y un precio mayor a 0.';
   if (s.prods.some(p => p.name.toLowerCase() === name.trim().toLowerCase())) return 'Ya existe un producto con ese nombre.';
   s.prods.push({ id: Math.max(0, ...s.prods.map(p => p.id)) + 1, name: name.trim(), price, cost, stock, min }); return null;
+}
+
+/* ───────── Caja: apertura, cierre y movimientos ───────── */
+export function abrir(s: S, inicial: Record<string, number>, nota = ''): string | null {
+  if (abierta(s)) return 'La caja ya está abierta.';
+  s.turnos.push({ id: s.turnos.length + 1, abre: now(), inicial, nota }); return null;
+}
+export function actualizarInicial(s: S, inicial: Record<string, number>): string | null {
+  if (!abierta(s)) return CERRADA;
+  turnoActual(s).inicial = inicial; return null;
+}
+export function cerrar(s: S, contado: Record<string, number>, nota = ''): string | null {
+  if (!abierta(s)) return 'La caja ya está cerrada.';
+  const t = turnoActual(s);
+  t.esperado = esperado(s, t); t.contado = contado; t.cierreNota = nota; t.cierra = now(); return null;
+}
+export function movimiento(s: S, tipo: 'IN' | 'OUT', medio: string, monto: number, desc: string): string | null {
+  if (!abierta(s)) return CERRADA;
+  if (!(monto > 0)) return 'El monto debe ser mayor a 0.';
+  if (!desc.trim()) return 'Escribí el motivo del movimiento.';
+  const t = turnoActual(s);
+  if (tipo === 'OUT' && (esperado(s, t)[medio] ?? 0) < monto) return 'No hay saldo suficiente en ese medio.';
+  s.movs.push({ id: s.movs.length + 1, turno: t.id, at: now(), tipo, medio, monto, desc: desc.trim(), void: false }); return null;
+}
+export function anularMov(s: S, id: number): string | null {
+  const m = s.movs.find(x => x.id === id);
+  if (!m || m.void) return 'El movimiento no existe o ya está anulado.';
+  if (!abierta(s) || m.turno !== turnoActual(s).id) return 'Solo se anulan movimientos del turno abierto.';
+  m.void = true; return null;
+}
+
+/* ───────── Combos / ofertas ───────── */
+export function nuevoCombo(s: S, name: string, notes: string, items: { pid: number; qty: number }[], price: number): string | null {
+  if (!name.trim()) return 'Poné un nombre al combo.';
+  if (!items.length) return 'Agregá productos al combo.';
+  if (s.prods.some(p => p.name.toLowerCase() === name.trim().toLowerCase())) return 'Ya existe un producto con ese nombre.';
+  const cost = items.reduce((a, l) => a + l.qty * (prod(s, l.pid)?.cost ?? 0), 0);
+  const pr = price > 0 ? price : (calcPrecio(cost, s.cfg.mv, s.cfg, selDefault)?.lista ?? cost * 2);
+  s.prods.push({ id: Math.max(0, ...s.prods.map(p => p.id)) + 1, name: name.trim(), stock: 0, min: 0, cost: Math.round(cost * 100) / 100,
+    price: pr, combo: items.map(i => ({ ...i })), notes: notes.trim() || undefined });
+  return null;
+}
+export function eliminarCombo(s: S, id: number): string | null {
+  s.prods = s.prods.filter(p => p.id !== id); return null;
 }
 
 type Cat = 'cobros' | 'compras' | 'gastos';
@@ -128,6 +209,11 @@ export function saldos(s: S) {
     const x = f.c === 'cobros' ? f.a : -f.a, t = medioTipo(s, f.m);
     if (t === 'caja') caja += x; else if (t === 'banco') banco += x;
   }
+  for (const m of s.movs) {
+    if (m.void) continue;
+    const x = m.tipo === 'IN' ? m.monto : -m.monto, t = medioTipo(s, m.medio);
+    if (t === 'caja') caja += x; else if (t === 'banco') banco += x;
+  }
   return { caja, banco };
 }
 
@@ -145,6 +231,7 @@ export const por = (s: S, tipos: Tipo[]) => s.txs.filter(t => !t.void && t.statu
 
 export function seed(): S {
   const s: S = { seq: 0, cfg: cfgDefault(), neg: { nombre: '', cuit: '', tel: '', dir: '', email: '' }, caja0: 60000, banco0: 600000, txs: [],
+    turnos: [], movs: [],
     medios: [{ name: 'Efectivo', tipo: 'caja' }, { name: 'Mercado Pago', tipo: 'banco' },
       { name: 'Transferencia Bancaria', tipo: 'banco' }, { name: 'Fiado / Cta Corriente', tipo: 'credito' }],
     prods: [
@@ -156,6 +243,7 @@ export function seed(): S {
       { id: 6, name: 'Agua mineral 500ml', stock: 24, min: 12, cost: 600, price: 1400 }] };
   const ago = (h: number) => new Date(Date.now() - h * 36e5).toISOString();
   const day = (n: number) => new Date(Date.now() + n * 864e5).toISOString().slice(0, 10);
+  s.turnos.push({ id: 1, abre: ago(100), nota: 'Apertura inicial', inicial: { Efectivo: s.caja0, 'Mercado Pago': s.banco0 } });
   gasto(s, [{ cat: 'Alquiler', desc: 'Alquiler del local', monto: 350000 }], 'Transferencia Bancaria', 'PAID', undefined, 'Inmobiliaria Centro', 0, false, ago(48));
   compra(s, [{ pid: 4, qty: 24, cost: 700 }], 'Fiado / Cta Corriente', 'PENDING', day(10), 'Distribuidora Sur', 21, false, ago(24));
   venta(s, { 2: 5, 3: 5 }, 'Fiado / Cta Corriente', 'PENDING', day(-1), 'Oficina García', 0, ago(72));
