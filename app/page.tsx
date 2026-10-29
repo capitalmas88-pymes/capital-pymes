@@ -1,6 +1,6 @@
 'use client';
 import { ReactNode, useEffect, useRef, useState } from 'react';
-import { CUOTAS, Cfg, GLn, Insumo, Ln, Medio, Pago, Prod, REDONDEOS, RLn, S, Sel, St, Tx, abierta, anular, calcInverso, calcIva, calcPrecio, cambiarCostoInsumo, compra, costoReceta, eliminarReceta, fabricar, flows, gasto, impactoCosto, ivaRes, liquidar, money, nuevaReceta, nuevoInsumo, nuevoProd, por, pyl, recargoMedio, recargoPasarela, recargoPlataforma, saldo, saldos, seed, selDefault, stk, venta } from '../lib/engine';
+import { CUOTAS, Cfg, GLn, Insumo, Ln, Medio, Pago, Prod, REDONDEOS, RLn, S, Sel, St, Tx, abierta, anular, calcInverso, calcIva, calcPrecio, cambiarCostoInsumo, compra, costoReceta, eliminarReceta, fabricar, flows, gasto, impactoCosto, ivaRes, liquidar, money, nuevaReceta, nuevoInsumo, nuevoProd, por, pyl, recargoMedio, recargoPasarela, recargoPlataforma, enTransito, liberarAhora, neto, transito, saldo, saldos, seed, selDefault, stk, venta } from '../lib/engine';
 import { Apertura, Cierre, Combos, EstadoCaja, Movs } from './Extras';
 
 const MESES = ['Ene', 'Feb', 'Mar', 'Abr', 'May', 'Jun', 'Jul', 'Ago', 'Sep', 'Oct', 'Nov', 'Dic'];
@@ -37,34 +37,44 @@ function usePago(s: S, credito = true) {
 
 /* Canal de venta + medio de pago de la registradora
    · Local físico: medios tradicionales (+ pasarelas de pago si las usás en el mostrador)
-   · Plataforma / e-commerce (MercadoLibre, Tienda Nube…): se lee de Configuración; la plataforma acredita en Banco */
-function usePagoVenta(s: S) {
+   · Plataforma / e-commerce (MercadoLibre, Tienda Nube…): se lee de Configuración EN VIVO; la plataforma acredita en Banco
+   Los canales y pasarelas se guardan por NOMBRE (no por posición), así agregar/quitar en Configuración no descoloca la selección. */
+function usePagoVenta(s: S, onCanal?: () => void) {
   const pasN = s.cfg.pasarelas.map(p => p.name.trim().toLowerCase());
   const platN = s.cfg.plataformas.map(p => p.name.trim().toLowerCase());
   const trad = s.medios.filter(m => !pasN.includes(m.name.trim().toLowerCase()) && !platN.includes(m.name.trim().toLowerCase()));
-  const [canalSel, setCanalSel] = useState(0);
+  const dVence = () => new Date(Date.now() + 15 * 864e5).toISOString().slice(0, 10);
+  const [canalSel, setCanalSel] = useState(''); // '' = local físico; si no, nombre de la plataforma
   const [sel, setSel] = useState('m|' + (trad[0]?.name ?? ''));
   const [cuotas, setCu] = useState(1);
   const [estado, setE] = useState<St>('PAID');
-  const [vence, setV] = useState(() => new Date(Date.now() + 15 * 864e5).toISOString().slice(0, 10));
-  const canal = canalSel >= 1 && canalSel <= s.cfg.plataformas.length ? canalSel : 0; // 0 = local físico
-  const pIdx = sel.startsWith('p|') ? +sel.slice(2) : 0;
-  const pas = !canal && pIdx >= 1 && pIdx <= s.cfg.pasarelas.length ? pIdx : 0; // 0 = medio tradicional
+  const [vence, setV] = useState(dVence);
+  const canal = canalSel ? s.cfg.plataformas.findIndex(p => p.name === canalSel) + 1 : 0; // 0 = local físico
+
+  // Al cambiar de canal se limpia todo lo del canal anterior (medio, cuotas, estado, vencimiento y, desde Venta, el pago mixto)
+  const reset = () => { setSel('m|' + (trad[0]?.name ?? '')); setCu(1); setE('PAID'); setV(dVence()); };
+  const cambiarCanal = (v: string) => { setCanalSel(v); reset(); onCanal?.(); };
+  // si la plataforma elegida se quita desde Configuración, la caja vuelve sola al local físico
+  useEffect(() => { if (canalSel && !canal) cambiarCanal(''); });
+
+  const pSel = sel.startsWith('p|') ? sel.slice(2) : '';
+  const pas = !canal && pSel ? s.cfg.pasarelas.findIndex(p => p.name === pSel) + 1 : 0; // 0 = medio tradicional
   const mSel = sel.startsWith('m|') ? sel.slice(2) : '';
   const medio = canal ? s.cfg.plataformas[canal - 1].name : pas ? s.cfg.pasarelas[pas - 1].name : trad.some(m => m.name === mSel) ? mSel : trad[0]?.name ?? '';
   const cu = pas ? cuotas : 1;
+  const plat = canal ? s.cfg.plataformas[canal - 1] : null;
   const ui: ReactNode = (<>
-    <label>Canal de venta<select value={canal} onChange={e => { setCanalSel(+e.target.value); setCu(1); }}>
-      <option value={0}>🏪 Local físico</option>
-      {!!s.cfg.plataformas.length && <optgroup label="Plataformas / E-commerce">
-        {s.cfg.plataformas.map((p, i) => <option key={i} value={i + 1}>🛒 {p.name} · {p.pct}%</option>)}</optgroup>}
+    <label>Canal de venta<select value={canal ? canalSel : ''} onChange={e => cambiarCanal(e.target.value)}>
+      <option value="">🏪 Local físico</option>
+      {s.cfg.plataformas.some(p => p.name.trim()) && <optgroup label="Plataformas / E-commerce">
+        {s.cfg.plataformas.filter(p => p.name.trim()).map(p => <option key={p.name} value={p.name}>🛒 {p.name} · {p.pct}%</option>)}</optgroup>}
     </select></label>
     {canal > 0
-      ? <label>Cobro<input readOnly value="La plataforma acredita en Banco / Digital" /></label>
-      : <label>Medio de pago<select value={pas ? 'p|' + pas : 'm|' + medio} onChange={e => { setSel(e.target.value); setCu(1); }}>
+      ? <label>Cobro<input readOnly value={s.cfg.demoraFondos && (plat?.dias ?? 0) > 0 ? `Fondos en tránsito · se liberan a los ${plat?.dias} días` : 'La plataforma acredita en Banco / Digital'} /></label>
+      : <label>Medio de pago<select value={pas ? 'p|' + s.cfg.pasarelas[pas - 1].name : 'm|' + medio} onChange={e => { setSel(e.target.value); setCu(1); }}>
         <optgroup label="Tradicionales">{trad.map(m => <option key={m.name} value={'m|' + m.name}>{m.name}</option>)}</optgroup>
-        {!!s.cfg.pasarelas.length && <optgroup label="Pasarelas de pago">
-          {s.cfg.pasarelas.map((p, i) => <option key={i} value={'p|' + (i + 1)}>{p.name} · {p.pct}%</option>)}</optgroup>}
+        {s.cfg.pasarelas.some(p => p.name.trim()) && <optgroup label="Pasarelas de pago">
+          {s.cfg.pasarelas.filter(p => p.name.trim()).map(p => <option key={p.name} value={'p|' + p.name}>{p.name} · {p.pct}%</option>)}</optgroup>}
       </select></label>}
     {!canal && pas > 0 && <label>Financiación<select value={cuotas} onChange={e => setCu(+e.target.value)}>
       {[1, ...CUOTAS].map(n => { const x = n > 1 ? (s.cfg.cuotas[n]?.[pas - 1] ?? 0) : 0;
@@ -96,7 +106,7 @@ function Venta({ s, act }: { s: S; act: Act }) {
   const [mixto, setMixto] = useState(false); const [parts, setParts] = useState<Pago[]>([]);
   const [cobrando, setCobrando] = useState(false);
   const busq = useRef<HTMLInputElement>(null);
-  const pg = usePagoVenta(s); const iv = useIva();
+  const pg = usePagoVenta(s, () => { setMixto(false); setParts([]); setCobrando(false); }); const iv = useIva();
   const reales = s.medios.filter(m => m.tipo !== 'credito').map(m => m.name);
   const bloquea = (p: Prod) => s.cfg.bloqueaMin && stk(s, p) < p.min;
 
@@ -174,6 +184,7 @@ function Venta({ s, act }: { s: S; act: Act }) {
       {ivaM > 0 && <div className="row"><span className="mut">IVA incluido en el total</span><span>{money(ivaM)}</span></div>}
       {rec > 0 && <div className="row"><span className="mut">{pp ? `Recargo ${s.cfg.plataformas[pg.canal - 1]?.name} ${pp.pct}% (lo paga el cliente)` : pi ? `Recargo ${s.cfg.pasarelas[pg.pas - 1]?.name}${pg.cuotas > 1 ? ` en ${pg.cuotas} cuotas` : ''} (lo paga el cliente)` : 'Recargo por medio de pago (lo paga el cliente)'}</span><span>{money(rec)}</span></div>}
       {cx && cx.abs > 0 && <div style={warnSt}>ℹ️ {pp ? `La plataforma retiene ${money(cx.abs)} (${pp.pct}%): se acredita en Banco el neto y la diferencia se registra como gasto «Comisión por Plataforma».` : `La comisión de ${money(cx.abs)} la absorbe el comercio (no se traslada al cliente) y reduce tu margen.`}</div>}
+      {pp && pp.pct === 0 && <div style={warnSt}>ℹ️ «{s.cfg.plataformas[pg.canal - 1]?.name}» no tiene comisión configurada (0%): no se aplica recargo ni comisión.</div>}
       {cx && hayItems && <div className="row"><span className="mut">Se acredita en Banco (neto real)</span><b>{money(total - cx.abs)}</b></div>}
       <div className="row"><span className="mut">Total a cobrar</span><strong style={{ fontSize: 24 }}>{money(total + rec)}</strong></div>
 
@@ -315,14 +326,32 @@ function Registrar({ s, act }: { s: S; act: Act }) {
 
 function ModA({ s, act }: { s: S; act: Act }) {
   const [v, setV] = useState('reg');
-  const tabs = { reg: '✏️ Registrar', ape: '🔓 Apertura', cie: '🔒 Cierre', mov: '💱 Movimientos' };
+  const tabs = { reg: '✏️ Registrar', ape: '🔓 Apertura', cie: '🔒 Cierre', mov: '💱 Movimientos', fon: '🚚 Fondos en tránsito' };
   return (<div className="box">
     <div className="row"><h3>Caja</h3><EstadoCaja s={s} /></div>
     <div className="pills">{Object.entries(tabs).map(([k, l]) => <button key={k} className={v === k ? 'on' : ''} onClick={() => setV(k)}>{l}</button>)}</div>
     {v === 'reg' && (abierta(s) ? <Registrar s={s} act={act} /> : <p className="neg">🔒 La caja está cerrada. Abrila en la pestaña Apertura para operar.</p>)}
     {v === 'ape' && <Apertura s={s} act={act} />}
     {v === 'cie' && <Cierre s={s} act={act} />}
-    {v === 'mov' && <Movs s={s} act={act} />}</div>);
+    {v === 'mov' && <Movs s={s} act={act} />}
+    {v === 'fon' && <Transito s={s} act={act} />}</div>);
+}
+
+/* ───────── Fondos en tránsito (ventas por plataforma) ───────── */
+function Transito({ s, act }: { s: S; act: Act }) {
+  const lista = s.txs.filter(enTransito).sort((a, b) => (a.libera ?? '').localeCompare(b.libera ?? ''));
+  const dias = (t: Tx) => Math.max(0, Math.ceil((+new Date(t.libera!) - Date.now()) / 864e5));
+  const dia = (iso: string) => new Date(iso).toLocaleDateString('es-AR', { day: '2-digit', month: '2-digit' });
+  return (<div className="box"><h3>🚚 Fondos en tránsito</h3>
+    <p className="mut">Ventas por plataforma cuyo dinero todavía no se acreditó en Banco / Digital. Pasan al saldo disponible solos al cumplirse el plazo de liberación. El plazo se configura por plataforma en Configuración.</p>
+    {!lista.length ? <p className="mut">No hay fondos en tránsito. 🎉</p> : (<>
+      <div className="row"><span>Total en tránsito (neto de comisión)</span><strong style={{ fontSize: 24 }}>{money(transito(s))}</strong></div>
+      <div className="scroll"><table><thead><tr><th>#</th><th>Plataforma</th><th>Venta</th><th>Comisión</th><th>Neto a liberar</th><th>Se libera</th><th>Faltan</th><th></th></tr></thead><tbody>
+        {lista.map(t => (<tr key={t.id}>
+          <td>{t.id}</td><td>{t.plat ?? t.medio}</td><td>{money(t.amount)}</td><td>{money((t.comAbs ?? 0) + (t.comTras ?? 0))}</td>
+          <td><b>{money(neto(t))}</b></td><td>{dia(t.libera!)}</td><td>{dias(t)} día(s)</td>
+          <td><button onClick={() => act(n => liberarAhora(n, t.id), `Fondos de #${t.id} liberados: ${money(neto(t))} pasan al banco.`)}>⏩ Liberar ahora</button></td></tr>))}</tbody></table></div>
+      <p className="mut">«Liberar ahora» simula que ya pasó el plazo (requiere caja abierta).</p></>)}</div>);
 }
 
 /* ───────── Insumos con actualización en cadena ───────── */
@@ -419,7 +448,7 @@ function ModC({ s, act }: { s: S; act: Act }) {
       {lista.map(t => { const sd = saldo(s, t); const parcial = t.status === 'PENDING' && sd < t.amount - 0.005; return (<tr key={t.id} style={t.void ? { opacity: .45 } : undefined}>
         <td>{t.id}</td><td>{fecha(t.at)}</td><td>{t.type}</td><td style={{ textAlign: 'left' }}>{t.desc}</td><td>{t.medio}</td>
         <td style={cobrable(t) ? { cursor: 'pointer' } : undefined} onClick={() => cobrable(t) && setAbId(t.id)} title={cobrable(t) ? 'Click para registrar un cobro o pago' : ''}>
-          {t.void ? '❌ Anulada' : t.status === 'PAID' ? '✅ Pagado' : venc(t) ? '⚠️ Vencida' : '⏳ Pendiente'}{parcial ? ` · saldo ${money(sd)}` : ''}</td>
+          {t.void ? '❌ Anulada' : t.status === 'PAID' ? (enTransito(t) ? `🚚 En tránsito · libera ${new Date(t.libera!).toLocaleDateString('es-AR', { day: '2-digit', month: '2-digit' })}` : '✅ Pagado') : venc(t) ? '⚠️ Vencida' : '⏳ Pendiente'}{parcial ? ` · saldo ${money(sd)}` : ''}</td>
         <td className={ING.includes(t.type) ? 'pos' : ''}>{ING.includes(t.type) ? '+' : '−'}{money(t.amount)}</td>
         <td>{cobrable(t) && <button onClick={() => setAbId(t.id)}>{t.type === 'SALE' ? 'Cobrar' : 'Pagar'}</button>}{' '}
           {!t.void && (conf === t.id
@@ -494,8 +523,9 @@ function ModD({ s }: { s: S }) {
     <h3 style={{ marginTop: 18 }}>Posición a hoy</h3>
     <div className="row"><span>Dinero disponible (caja + bancos)</span><b>{money(disp)}</b></div>
     <div className="row"><span>(+) Por cobrar</span><b className="pos">{money(cobrar)}</b></div>
+    <div className="row"><span>(+) Fondos en tránsito (plataformas)</span><b className="pos">{money(transito(s))}</b></div>
     <div className="row"><span>(−) Por pagar</span><b className="neg">{money(pagar)}</b></div>
-    <div className="row"><span>= Posición proyectada</span><b>{money(disp + cobrar - pagar)}</b></div>
+    <div className="row"><span>= Posición proyectada</span><b>{money(disp + cobrar + transito(s) - pagar)}</b></div>
     <h3 style={{ marginTop: 18 }}>🫁 Runway · oxígeno financiero</h3>
     <RW l={`Según resultado neto de ${MESES[m]}`} v={rwRes} burn={-netaMes} />
     <RW l={`Según flujo de caja de ${MESES[m]}`} v={rwFlu} burn={-flujoMes} />
@@ -587,14 +617,17 @@ function Calc({ s, act }: { s: S; act: Act }) {
 }
 
 /* ───────── Configuración ───────── */
-function Config({ s, act }: { s: S; act: Act }) {
+function Config({ s, act, upd }: { s: S; act: Act; upd: (fn: (n: S) => void) => void }) {
   const [neg, setNeg] = useState(s.neg); const [caja0, setCaja] = useState(s.caja0); const [banco0, setBanco] = useState(s.banco0);
   const [c, setC] = useState<Cfg>(() => structuredClone(s.cfg));
   const [medios, setMedios] = useState<Medio[]>(() => structuredClone(s.medios));
   const ed = (f: (d: Cfg) => void) => { const d = structuredClone(c); f(d); setC(d); };
-  const N = (l: string, v: number, f: (d: Cfg, x: number) => void) => <label>{l}<input type="number" value={v} onChange={e => ed(d => f(d, +e.target.value))} /></label>;
+  // «live»: el cambio se aplica al instante en toda la app (la Registradora lo ve sin recargar ni guardar); solo para pasarelas y plataformas
+  const edL = (f: (d: Cfg) => void) => { ed(f); upd(n => f(n.cfg)); };
+  const nuevoNombre = (arr: { name: string }[], base: string) => { let n = base, k = 2; while (arr.some(x => x.name.trim().toLowerCase() === n.toLowerCase())) n = `${base} ${k++}`; return n; };
+  const N = (l: string, v: number, f: (d: Cfg, x: number) => void, live = false) => <label>{l}<input type="number" min={0} value={v} onChange={e => (live ? edL : ed)(d => f(d, +e.target.value))} /></label>;
   const T = (l: string, k: keyof typeof neg) => <label>{l}<input value={neg[k]} onChange={e => setNeg({ ...neg, [k]: e.target.value })} /></label>;
-  const B = (l: string, k: 'trasladaCom' | 'trasladaCuotas' | 'bloqueaMin', ayuda: string) => (<div style={{ margin: '6px 0' }}>
+  const B = (l: string, k: 'trasladaCom' | 'trasladaCuotas' | 'bloqueaMin' | 'demoraFondos', ayuda: string) => (<div style={{ margin: '6px 0' }}>
     <label style={chkSt}><input type="checkbox" style={{ width: 'auto' }} checked={c[k]} onChange={e => ed(d => { d[k] = e.target.checked; })} />{l}</label>
     <span className="mut">{ayuda}</span></div>);
   return (<div className="grid">
@@ -608,6 +641,7 @@ function Config({ s, act }: { s: S; act: Act }) {
       {B('Trasladar comisiones al cliente', 'trasladaCom', ' Comisión de pasarela, plataforma (Mercado Pago, Tienda Nube…) y del medio de pago: se suma al ticket en vez de salir de tu margen.')}
       {B('Trasladar recargo por cuotas al cliente', 'trasladaCuotas', ' Si está apagado, lo absorbe el comercio y baja tu ganancia.')}
       {B('Bloquear ventas bajo el stock mínimo', 'bloqueaMin', ' Si está apagado, solo se muestra una advertencia.')}
+      {B('Simular demora en la liberación de fondos (plataformas)', 'demoraFondos', ' Activo: el dinero de las ventas por plataforma queda «en tránsito» los días configurados en cada plataforma y recién después pasa al banco. Apagado: se acredita al instante.')}
       <h3>Comisión por medio de pago (%)</h3>
       <div className="form">{medios.map((m, i) => m.tipo === 'credito' || [...c.pasarelas, ...c.plataformas].some(p => p.name.trim().toLowerCase() === m.name.trim().toLowerCase()) ? null : (
         <label key={m.name}>{m.name}<input type="number" min={0} value={m.com ?? 0} onChange={e => setMedios(medios.map((x, k) => k === i ? { ...x, com: +e.target.value } : x))} /></label>))}</div>
@@ -620,15 +654,16 @@ function Config({ s, act }: { s: S; act: Act }) {
         <label>Redondeo<select value={c.redTipo} onChange={e => ed(d => d.redTipo = e.target.value)}>{REDONDEOS.map(r => <option key={r}>{r}</option>)}</select></label>
         {N('Múltiplo $', c.redMult, (d, x) => d.redMult = x)}{N('Margen venta %', c.mv, (d, x) => d.mv = x)}{N('Margen mayorista %', c.mm, (d, x) => d.mm = x)}{N('Descuento %', c.desc, (d, x) => d.desc = x)}</div>
       <h3>Pasarelas de pago</h3>
-      {c.pasarelas.map((x, i) => <div className="form" key={i}><label>Nombre<input value={x.name} onChange={e => ed(d => d.pasarelas[i].name = e.target.value)} /></label>{N('%', x.pct, (d, v) => d.pasarelas[i].pct = v)}
-        <div style={{ alignSelf: 'end' }}><button onClick={() => ed(d => { d.pasarelas.splice(i, 1); CUOTAS.forEach(n => d.cuotas[n].splice(i, 1)); })}>✕</button></div></div>)}
-      <div className="pills"><button onClick={() => ed(d => { d.pasarelas.push({ name: '', pct: 0 }); CUOTAS.forEach(n => d.cuotas[n].push(0)); })}>➕ Agregar pasarela</button></div>
-      <p className="mut">Las pasarelas aparecen automáticamente en el selector de la Registradora. Guardá la configuración para que se apliquen.</p>
+      {c.pasarelas.map((x, i) => <div className="form" key={i}><label>Nombre<input value={x.name} onChange={e => edL(d => d.pasarelas[i].name = e.target.value)} /></label>{N('%', x.pct, (d, v) => d.pasarelas[i].pct = v, true)}
+        <div style={{ alignSelf: 'end' }}><button onClick={() => edL(d => { d.pasarelas.splice(i, 1); CUOTAS.forEach(n => d.cuotas[n].splice(i, 1)); })}>✕</button></div></div>)}
+      <div className="pills"><button onClick={() => edL(d => { d.pasarelas.push({ name: nuevoNombre(d.pasarelas, 'Nueva pasarela'), pct: 0 }); CUOTAS.forEach(n => d.cuotas[n].push(0)); })}>➕ Agregar pasarela</button></div>
+      <p className="mut">Alta, baja, nombre y % se reflejan al instante en el selector de la Registradora.</p>
       <h3>Plataformas / E-commerce (canales de venta)</h3>
-      {c.plataformas.map((x, i) => <div className="form" key={i}><label>Nombre<input value={x.name} onChange={e => ed(d => d.plataformas[i].name = e.target.value)} /></label>{N('% comisión', x.pct, (d, v) => d.plataformas[i].pct = v)}
-        <div style={{ alignSelf: 'end' }}><button onClick={() => ed(d => { d.plataformas.splice(i, 1); })}>✕</button></div></div>)}
-      <div className="pills"><button onClick={() => ed(d => { d.plataformas.push({ name: '', pct: 0 }); })}>➕ Agregar plataforma</button></div>
-      <p className="mut">Aparecen en la Registradora como «Canal de venta». Con «Trasladar comisiones» activo se suma al ticket; apagado, se acredita el neto y la comisión va a gastos. Guardá la configuración para aplicar.</p>
+      {c.plataformas.map((x, i) => <div className="form" key={i}><label>Nombre<input value={x.name} onChange={e => edL(d => d.plataformas[i].name = e.target.value)} /></label>{N('% comisión', x.pct, (d, v) => d.plataformas[i].pct = v, true)}
+        {N('Días de liberación', x.dias ?? 0, (d, v) => d.plataformas[i].dias = v, true)}
+        <div style={{ alignSelf: 'end' }}><button onClick={() => edL(d => { d.plataformas.splice(i, 1); })}>✕</button></div></div>)}
+      <div className="pills"><button onClick={() => edL(d => { d.plataformas.push({ name: nuevoNombre(d.plataformas, 'Nueva plataforma'), pct: 0, dias: 0 }); })}>➕ Agregar plataforma</button></div>
+      <p className="mut">Alta, baja, nombre, % y días se reflejan al instante en «Canal de venta» de la Registradora. Los días (ej. 2, 10, 14) son el plazo estimado en que la plataforma libera el dinero; con 0 se acredita al instante. Con «Trasladar comisiones» activo la comisión se suma al ticket; apagado, se acredita el neto y la comisión va a gastos.</p>
       <h3>Recargos por cuotas (%)</h3>
       <div className="scroll"><table><thead><tr><th>Cuotas</th>{c.pasarelas.map((x, i) => <th key={i}>{x.name || '(sin nombre)'}</th>)}</tr></thead><tbody>
         {CUOTAS.map(n => <tr key={n}><td>{n} cuotas</td>{c.cuotas[n].map((v, i) => <td key={i}><input type="number" style={{ width: 80 }} value={v} onChange={e => ed(d => d.cuotas[n][i] = +e.target.value)} /></td>)}</tr>)}</tbody></table></div>
@@ -636,6 +671,8 @@ function Config({ s, act }: { s: S; act: Act }) {
         if ([...c.pasarelas, ...c.plataformas].some(x => !x.name.trim())) return 'Todas las pasarelas y plataformas necesitan un nombre.';
         if (new Set(c.pasarelas.map(x => x.name.trim().toLowerCase())).size !== c.pasarelas.length) return 'Hay pasarelas con el mismo nombre.';
         if (new Set(c.plataformas.map(x => x.name.trim().toLowerCase())).size !== c.plataformas.length) return 'Hay plataformas con el mismo nombre.';
+        if ([...c.pasarelas, ...c.plataformas].some(x => !Number.isFinite(x.pct) || x.pct < 0 || x.pct > 95)) return 'Las comisiones de pasarelas y plataformas deben estar entre 0 y 95%.';
+        if (c.plataformas.some(x => !Number.isFinite(x.dias ?? 0) || (x.dias ?? 0) < 0)) return 'Los días de liberación no pueden ser negativos.';
         if (c.mgBajo > c.mgOk) return 'El margen «en riesgo» no puede superar al «saludable».';
         n.cfg = c; n.medios = medios; return null; }, 'Configuración guardada.')}>Guardar configuración</button>
         <button onClick={() => act(n => { for (const q of n.prods) if (q.cost > 0) { const r = calcPrecio(q.cost, n.cfg.mv, n.cfg, selDefault); if (r) q.price = r.lista; } return null; }, 'Precios recalculados con el margen de venta, Ing. Brutos y retenciones.')}>Recalcular todos los productos</button></div>
@@ -741,6 +778,7 @@ export default function Page() {
     if (e) { setMsg({ k: 'err', t: e }); return false; }
     setS(n); setMsg({ k: 'ok', t: ok }); return true;
   };
+  const upd = (fn: (n: S) => void) => setS(prev => { if (!prev) return prev; const n = structuredClone(prev); fn(n); return n; });
   const h = new Date(), mes = pyl(s, d => d.getMonth() === h.getMonth() && d.getFullYear() === h.getFullYear());
   const { caja, banco } = saldos(s);
   const bajos = s.prods.filter(p => stk(s, p) < p.min).length + s.insumos.filter(i => i.stock < i.min).length;
@@ -750,9 +788,10 @@ export default function Page() {
     <div className="kpis">
       <div className="kpi"><small>💵 Caja chica</small><strong>{money(caja)}</strong></div>
       <div className="kpi"><small>🏦 Bancos / Digital</small><strong>{money(banco)}</strong></div>
+      <div className="kpi"><small>🚚 Fondos en tránsito</small><strong>{money(transito(s))}</strong></div>
       <div className="kpi"><small>📦 Stock crítico</small><strong className={bajos ? 'neg' : ''}>{bajos}</strong></div>
       <div className="kpi"><small>📊 Resultado neto del mes</small><strong className={mes.neta < 0 ? 'neg' : 'pos'}>{money(mes.neta)}</strong></div></div>
     <div className="nav">{(Object.keys(SECC) as (keyof typeof SECC)[]).map(k => <button key={k} className={tab === k ? 'on' : ''} onClick={() => setTab(k)}>{SECC[k]}</button>)}</div>
-    {tab === 'A' && <ModA s={s} act={act} />}{tab === 'B' && <ModB s={s} act={act} />}{tab === 'F' && <Recetas s={s} act={act} />}{tab === 'C' && <ModC s={s} act={act} />}{tab === 'D' && <ModD s={s} />}{tab === 'E' && <Config s={s} act={act} />}
+    {tab === 'A' && <ModA s={s} act={act} />}{tab === 'B' && <ModB s={s} act={act} />}{tab === 'F' && <Recetas s={s} act={act} />}{tab === 'C' && <ModC s={s} act={act} />}{tab === 'D' && <ModD s={s} />}{tab === 'E' && <Config s={s} act={act} upd={upd} />}
     {msg && <div className={'toast ' + (msg.k === 'err' ? 'err' : '')}>{msg.t}</div>}</div>);
 }
