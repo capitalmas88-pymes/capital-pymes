@@ -7,7 +7,8 @@ export type Item = { pid: number; name: string; qty: number; price: number; cost
 export type Pago = { medio: string; monto: number };
 export type Tx = { id: number; type: Tipo; desc: string; amount: number; costAmt: number; medio: string; status: St;
   due?: string; at: string; items: Item[]; void: boolean; paidBy?: number; pays?: number; disc: number; iva?: number; prov?: string;
-  rec?: number; split?: Pago[] }; // rec = recargo trasladado al cliente por el medio de pago · split = pago mixto
+  rec?: number; split?: Pago[]; // rec = recargo trasladado al cliente · split = pago mixto
+  comAbs?: number; pas?: string; cuotas?: number }; // comAbs = comisión de pasarela/cuotas que absorbe el comercio
 export type Turno = { id: number; abre: string; cierra?: string; inicial: Record<string, number>; nota: string;
   esperado?: Record<string, number>; contado?: Record<string, number>; cierreNota?: string };
 export type Mov = { id: number; turno: number; at: string; tipo: 'IN' | 'OUT'; medio: string; monto: number; desc: string; void: boolean };
@@ -64,6 +65,23 @@ export function recargoMedio(s: S, medio: string, monto: number) {
   return c > 0 && c < 100 ? r2(monto / (1 - c / 100) - monto) : 0;
 }
 
+// Recargo de una pasarela + cuotas. Respeta los switches de Configuración:
+// lo trasladado se suma al ticket (rec); lo que NO se traslada lo absorbe el comercio (abs).
+export function recargoPasarela(s: S, pas: number, cuotas: number, monto: number) {
+  const pa = s.cfg.pasarelas[pas - 1];
+  if (!pa) return { rec: 0, abs: 0, cliente: monto, pctCom: 0, pctCuo: 0, pctT: 0 };
+  const pctCuo = cuotas > 1 ? (s.cfg.cuotas[cuotas]?.[pas - 1] ?? 0) : 0;
+  const tCom = s.cfg.trasladaCom ? pa.pct : 0, tCuo = s.cfg.trasladaCuotas ? pctCuo : 0;
+  const pctT = Math.min(tCom + tCuo, 95);
+  const cliente = pctT > 0 ? r2(monto / (1 - pctT / 100)) : monto;
+  const abs = r2((s.cfg.trasladaCom ? 0 : monto * pa.pct / 100) + (s.cfg.trasladaCuotas ? 0 : monto * pctCuo / 100));
+  return { rec: r2(cliente - monto), abs, cliente, pctCom: pa.pct, pctCuo, pctT };
+}
+
+// Las pasarelas no son cuentas propias: su plata cae en la primera cuenta tipo banco
+export const cuentaDe = (s: S, n: string) =>
+  s.medios.some(m => m.name === n) ? n : (s.medios.find(m => m.tipo === 'banco')?.name ?? n);
+
 export type Ln = { pid: number; qty: number; cost: number; ins?: boolean };
 export type GLn = { cat: string; desc: string; monto: number };
 export function calcIva(base: number, pct: number, inc: boolean) {
@@ -76,7 +94,7 @@ const sfx = (pct: number, iva: number, inc: boolean, prov: string) =>
   (iva ? ` · IVA ${pct}% ${money(iva)}${inc ? ' incl.' : ''}` : '') + (prov ? ` · Prov. ${prov}` : '');
 
 export function venta(s: S, cart: Record<number, number>, medio: string, st: St, due: string | undefined,
-  nota = '', pct = 0, at = now(), ivaPct = 0, ivaInc = false, split?: Pago[]): string | null {
+  nota = '', pct = 0, at = now(), ivaPct = 0, ivaInc = false, split?: Pago[], pas = 0, cuotas = 1): string | null {
   if (!abierta(s)) return CERRADA;
   const ids = Object.keys(cart).map(Number);
   if (!ids.length) return 'El ticket está vacío.';
@@ -104,12 +122,25 @@ export function venta(s: S, cart: Record<number, number>, medio: string, st: St,
     parts = split.map(p => ({ medio: p.medio, monto: r2(p.monto + recargoMedio(s, p.medio, p.monto)) }));
     st = 'PAID'; medio = parts.map(p => p.medio).join(' + ');
   }
-  const rec = parts ? r2(parts.reduce((a, p) => a + p.monto, 0) - total) : recargoMedio(s, medio, total);
+
+  // pasarela / plataforma (solo si no es pago mixto)
+  let rec = 0, comAbs = 0, pasName: string | undefined, pasTxt = '';
+  if (parts) rec = r2(parts.reduce((a, p) => a + p.monto, 0) - total);
+  else if (pas > 0) {
+    const pa = s.cfg.pasarelas[pas - 1];
+    if (!pa) return 'La pasarela elegida ya no existe en Configuración.';
+    if (cuotas > 1 && s.cfg.cuotas[cuotas] == null) return 'Esa cantidad de cuotas no está configurada.';
+    const r = recargoPasarela(s, pas, cuotas, total);
+    rec = r.rec; comAbs = r.abs; pasName = pa.name; medio = pa.name; st = 'PAID'; due = undefined;
+    pasTxt = ` · Pasarela ${pa.name}${cuotas > 1 ? ` ${cuotas} cuotas` : ''}`;
+  } else rec = recargoMedio(s, medio, total);
 
   ids.forEach(id => mueve(s, prod(s, id)!, -cart[id]));
   push(s, { type: 'SALE', desc: items.map(i => `${i.qty}× ${i.name}`).join(', ') + (disc ? ` (desc. ${pct}%)` : '') + sfx(ivaPct, iva, ivaInc, '')
-      + (parts ? ` · Mixto: ${parts.map(p => `${p.medio} ${money(p.monto)}`).join(' + ')}` : '') + (rec ? ` · Recargo medio ${money(rec)}` : '') + (nota ? ` — ${nota}` : ''),
-    amount: r2(total + rec), costAmt: costo, medio, status: st, at, items, disc, iva, rec: rec || undefined, split: parts }, due);
+      + (parts ? ` · Mixto: ${parts.map(p => `${p.medio} ${money(p.monto)}`).join(' + ')}` : '') + pasTxt
+      + (rec ? ` · Recargo ${pasName ? 'pasarela' : 'medio'} ${money(rec)}` : '') + (comAbs ? ` · Comisión absorbida ${money(comAbs)}` : '') + (nota ? ` — ${nota}` : ''),
+    amount: r2(total + rec), costAmt: costo, medio, status: st, at, items, disc, iva, rec: rec || undefined, split: parts,
+    comAbs: comAbs || undefined, pas: pasName, cuotas: pasName && cuotas > 1 ? cuotas : undefined }, due);
   return null;
 }
 
@@ -338,7 +369,7 @@ export function flows(s: S) {
     const d = new Date(t.at), paid = t.status === 'PAID', liq = t.paidBy != null;
     if (t.type === 'SALE' && paid && !liq) {
       if (t.split) t.split.forEach(p => o.push({ d, c: 'cobros', a: p.monto, m: p.medio })); // pago mixto
-      else o.push({ d, c: 'cobros', a: t.amount, m: t.medio });
+      else o.push({ d, c: 'cobros', a: t.amount - (t.comAbs ?? 0), m: cuentaDe(s, t.medio) }); // neto de la comisión absorbida
     }
     else if (t.type === 'COLLECTION') o.push({ d, c: 'cobros', a: t.amount, m: t.medio });
     else if (t.type === 'PAYMENT') o.push({ d, c: s.txs.find(x => x.id === t.pays)?.type === 'PURCHASE' ? 'compras' : 'gastos', a: t.amount, m: t.medio });
@@ -367,7 +398,8 @@ export function pyl(s: S, f: (d: Date) => boolean) {
   for (const t of s.txs) {
     if (t.void || !f(new Date(t.at))) continue;
     // el recargo trasladado por el medio de pago no es ingreso del negocio: es plata de paso
-    if (t.type === 'SALE') { v += t.amount - (t.iva ?? 0) - (t.rec ?? 0) + t.disc; d += t.disc; c += t.costAmt; }
+    // la comisión de pasarela/cuotas que absorbe el comercio (comAbs) resta del resultado
+    if (t.type === 'SALE') { v += t.amount - (t.iva ?? 0) - (t.rec ?? 0) + t.disc; d += t.disc; c += t.costAmt; g += t.comAbs ?? 0; }
     else if (t.type === 'EXPENSE') g += t.amount - (t.iva ?? 0);
   }
   return { v, d, c, g, vn: v - d, bruta: v - d - c, neta: v - d - c - g };
@@ -385,7 +417,7 @@ export function seed(): S {
     recetas: [{ id: 1, name: 'Medialuna', lote: 12, unidad: 'Unidad', pid: 1, mo: 2000, cf: 500, merma: 5,
       ins: [{ iid: 1, qty: 0.6 }, { iid: 2, qty: 0.3, merma: 8 }, { iid: 3, qty: 0.05 }] }],
     fabs: [],
-    medios: [{ name: 'Efectivo', tipo: 'caja' }, { name: 'Mercado Pago', tipo: 'banco', com: 7 },
+    medios: [{ name: 'Efectivo', tipo: 'caja' }, { name: 'Mercado Pago', tipo: 'banco' },
       { name: 'Transferencia Bancaria', tipo: 'banco', com: 0 }, { name: 'Fiado / Cta Corriente', tipo: 'credito' }],
     prods: [
       { id: 1, name: 'Medialuna', stock: 36, min: 12, cost: 350, price: 900 },
