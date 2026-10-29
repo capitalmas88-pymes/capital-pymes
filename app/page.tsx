@@ -1,6 +1,6 @@
 'use client';
 import { ReactNode, useEffect, useRef, useState } from 'react';
-import { CUOTAS, Cfg, GLn, Insumo, Ln, Medio, Pago, Prod, REDONDEOS, RLn, S, Sel, St, Tx, abierta, anular, calcInverso, calcIva, calcPrecio, cambiarCostoInsumo, compra, costoReceta, eliminarReceta, fabricar, flows, gasto, impactoCosto, ivaRes, liquidar, money, nuevaReceta, nuevoInsumo, nuevoProd, por, pyl, recargoMedio, saldo, saldos, seed, selDefault, stk, venta } from '../lib/engine';
+import { CUOTAS, Cfg, GLn, Insumo, Ln, Medio, Pago, Prod, REDONDEOS, RLn, S, Sel, St, Tx, abierta, anular, calcInverso, calcIva, calcPrecio, cambiarCostoInsumo, compra, costoReceta, eliminarReceta, fabricar, flows, gasto, impactoCosto, ivaRes, liquidar, money, nuevaReceta, nuevoInsumo, nuevoProd, por, pyl, recargoMedio, recargoPasarela, saldo, saldos, seed, selDefault, stk, venta } from '../lib/engine';
 import { Apertura, Cierre, Combos, EstadoCaja, Movs } from './Extras';
 
 const MESES = ['Ene', 'Feb', 'Mar', 'Abr', 'May', 'Jun', 'Jul', 'Ago', 'Sep', 'Oct', 'Nov', 'Dic'];
@@ -35,6 +35,34 @@ function usePago(s: S, credito = true) {
   return { medio, estado, vence, ui };
 }
 
+/* Medio de pago de la registradora: Tradicionales + Pasarelas (leídas de Configuración) */
+function usePagoVenta(s: S) {
+  const pasN = s.cfg.pasarelas.map(p => p.name.trim().toLowerCase());
+  const trad = s.medios.filter(m => !pasN.includes(m.name.trim().toLowerCase()));
+  const [sel, setSel] = useState('m|' + (trad[0]?.name ?? ''));
+  const [cuotas, setCu] = useState(1);
+  const [estado, setE] = useState<St>('PAID');
+  const [vence, setV] = useState(() => new Date(Date.now() + 15 * 864e5).toISOString().slice(0, 10));
+  const pIdx = sel.startsWith('p|') ? +sel.slice(2) : 0;
+  const pas = pIdx >= 1 && pIdx <= s.cfg.pasarelas.length ? pIdx : 0; // 0 = medio tradicional
+  const mSel = sel.startsWith('m|') ? sel.slice(2) : '';
+  const medio = pas ? s.cfg.pasarelas[pas - 1].name : trad.some(m => m.name === mSel) ? mSel : trad[0]?.name ?? '';
+  const cu = pas ? cuotas : 1;
+  const ui: ReactNode = (<>
+    <label>Medio de pago<select value={pas ? 'p|' + pas : 'm|' + medio} onChange={e => { setSel(e.target.value); setCu(1); }}>
+      <optgroup label="Tradicionales">{trad.map(m => <option key={m.name} value={'m|' + m.name}>{m.name}</option>)}</optgroup>
+      {!!s.cfg.pasarelas.length && <optgroup label="Pasarelas y Plataformas">
+        {s.cfg.pasarelas.map((p, i) => <option key={i} value={'p|' + (i + 1)}>{p.name} · {p.pct}%</option>)}</optgroup>}
+    </select></label>
+    {pas > 0 && <label>Financiación<select value={cuotas} onChange={e => setCu(+e.target.value)}>
+      {[1, ...CUOTAS].map(n => { const x = n > 1 ? (s.cfg.cuotas[n]?.[pas - 1] ?? 0) : 0;
+        return <option key={n} value={n}>{n === 1 ? '1 pago' : `${n} cuotas · ${x}%`}</option>; })}</select></label>}
+    {!pas && <label>Estado<select value={estado} onChange={e => setE(e.target.value as St)}><option value="PAID">Pagado</option><option value="PENDING">Pendiente</option></select></label>}
+    {!pas && estado === 'PENDING' && <label>Vence<input type="date" value={vence} onChange={e => setV(e.target.value)} /></label>}
+  </>);
+  return { medio, pas, cuotas: cu, estado: (pas ? 'PAID' : estado) as St, vence, ui };
+}
+
 const IVAS = [0, 10.5, 21, 27];
 function useIva() {
   const [pct, setP] = useState(0); const [inc, setI] = useState(false);
@@ -56,7 +84,7 @@ function Venta({ s, act }: { s: S; act: Act }) {
   const [mixto, setMixto] = useState(false); const [parts, setParts] = useState<Pago[]>([]);
   const [cobrando, setCobrando] = useState(false);
   const busq = useRef<HTMLInputElement>(null);
-  const pg = usePago(s); const iv = useIva();
+  const pg = usePagoVenta(s); const iv = useIva();
   const reales = s.medios.filter(m => m.tipo !== 'credito').map(m => m.name);
   const bloquea = (p: Prod) => s.cfg.bloqueaMin && stk(s, p) < p.min;
 
@@ -68,7 +96,8 @@ function Venta({ s, act }: { s: S; act: Act }) {
   const bruto = Object.entries(cart).reduce((a, [id, n]) => a + n * (s.prods.find(p => p.id === +id)?.price ?? 0), 0);
   const disc = Math.round(bruto * Math.min(Math.max(pct, 0), 100)) / 100;
   const { total, iva: ivaM } = calcIva(bruto - disc, iv.pct, iv.inc);
-  const rec = mixto ? r2(parts.reduce((a, p) => a + recargoMedio(s, p.medio, p.monto), 0)) : recargoMedio(s, pg.medio, total);
+  const pi = !mixto && pg.pas ? recargoPasarela(s, pg.pas, pg.cuotas, total) : null;
+  const rec = mixto ? r2(parts.reduce((a, p) => a + recargoMedio(s, p.medio, p.monto), 0)) : pi ? pi.rec : recargoMedio(s, pg.medio, total);
   const sumParts = r2(parts.reduce((a, p) => a + p.monto, 0));
   const dif = r2(total - sumParts);
   const mixtoOk = !mixto || (parts.length >= 2 && Math.abs(dif) < 0.01 && parts.every(p => p.monto > 0));
@@ -88,7 +117,7 @@ function Venta({ s, act }: { s: S; act: Act }) {
 
   const confirmar = () => {
     if (!hayItems || !mixtoOk) { setCobrando(false); return; }
-    const ok = act(n => venta(n, cart, pg.medio, pg.estado, pg.vence, nota.trim(), pct, undefined, iv.pct, iv.inc, mixto ? parts : undefined),
+    const ok = act(n => venta(n, cart, pg.medio, pg.estado, pg.vence, nota.trim(), pct, undefined, iv.pct, iv.inc, mixto ? parts : undefined, mixto ? 0 : pg.pas, pg.cuotas),
       `Venta registrada por ${money(total + rec)}.`);
     if (ok) { setCart({}); setNota(''); setPct(0); setMixto(false); setParts([]); }
     setCobrando(false);
@@ -128,11 +157,12 @@ function Venta({ s, act }: { s: S; act: Act }) {
           <span>{money(n * p.price)} <button onClick={() => add(+id, -1)}>−</button> <button onClick={() => add(+id, 1)}>+</button></span></div>); })}
       {!!bajosEnTicket.length && <div style={warnSt}>⚠️ Ojo: {bajosEnTicket.map(p => `${p.name} (hay ${stk(s, p)}, mínimo ${p.min})`).join(' · ')}. Reponé stock pronto.</div>}
       {ivaM > 0 && <div className="row"><span className="mut">IVA incluido en el total</span><span>{money(ivaM)}</span></div>}
-      {rec > 0 && <div className="row"><span className="mut">Recargo por medio de pago (lo paga el cliente)</span><span>{money(rec)}</span></div>}
+      {rec > 0 && <div className="row"><span className="mut">{pi ? `Recargo ${s.cfg.pasarelas[pg.pas - 1]?.name}${pg.cuotas > 1 ? ` en ${pg.cuotas} cuotas` : ''} (lo paga el cliente)` : 'Recargo por medio de pago (lo paga el cliente)'}</span><span>{money(rec)}</span></div>}
+      {pi && pi.abs > 0 && <div style={warnSt}>ℹ️ La comisión de {money(pi.abs)} la absorbe el comercio (no se traslada al cliente) y reduce tu margen.</div>}
       <div className="row"><span className="mut">Total a cobrar</span><strong style={{ fontSize: 24 }}>{money(total + rec)}</strong></div>
 
       <div className="form">
-        {!mixto && pg.ui}{iv.ui}
+        {mixto ? null : pg.ui}{iv.ui}
         <label>Cliente / nota<input value={nota} onChange={e => setNota(e.target.value)} /></label>
         <label>Descuento %<input type="number" min={0} max={100} value={pct} onChange={e => setPct(+e.target.value)} /></label></div>
 
@@ -435,7 +465,7 @@ function ModD({ s }: { s: S }) {
   return (<div className="box"><h3>Estado de resultados · {y}</h3>
     <Tabla title="Concepto" rows={[['Ventas', col('v')], ['(−) Descuentos', col('d').map(x => -x)], ['Ventas netas', col('vn'), true],
       ['(−) Costo de ventas', col('c').map(x => -x)], ['Utilidad bruta', col('bruta'), true], ['(−) Gastos', col('g').map(x => -x)], ['Utilidad neta', col('neta'), true]]} />
-    <p className="mut">Criterio devengado: cuenta el día que se registra, aunque se cobre o pague después.</p>
+    <p className="mut">Criterio devengado: cuenta el día que se registra, aunque se cobre o pague después. Los gastos incluyen las comisiones de pasarela que absorbe el comercio.</p>
     <Grafico title="📈 Ventas netas vs. costo vs. gastos" labels={MESES} series={[
       { name: 'Ventas netas', color: '#3fb950', v: col('vn') }, { name: 'Costo de ventas', color: '#d29922', v: col('c') },
       { name: 'Gastos', color: '#f85149', v: col('g') }, { name: 'Utilidad neta', color: '#58a6ff', v: col('neta'), line: true }]} />
@@ -563,9 +593,9 @@ function Config({ s, act }: { s: S; act: Act }) {
       {B('Trasladar recargo por cuotas al cliente', 'trasladaCuotas', ' Si está apagado, lo absorbe el comercio y baja tu ganancia.')}
       {B('Bloquear ventas bajo el stock mínimo', 'bloqueaMin', ' Si está apagado, solo se muestra una advertencia.')}
       <h3>Comisión por medio de pago (%)</h3>
-      <div className="form">{medios.map((m, i) => m.tipo === 'credito' ? null : (
+      <div className="form">{medios.map((m, i) => m.tipo === 'credito' || c.pasarelas.some(p => p.name.trim().toLowerCase() === m.name.trim().toLowerCase()) ? null : (
         <label key={m.name}>{m.name}<input type="number" min={0} value={m.com ?? 0} onChange={e => setMedios(medios.map((x, k) => k === i ? { ...x, com: +e.target.value } : x))} /></label>))}</div>
-      <p className="mut">Se aplica en la registradora cuando «Trasladar comisiones» está activo.</p>
+      <p className="mut">Se aplica en la registradora cuando «Trasladar comisiones» está activo. Las pasarelas se configuran más abajo, en «Pasarelas de pago».</p>
       <h3>🚦 Semáforo de rentabilidad</h3>
       <div className="form">{N('Margen saludable desde %', c.mgOk, (d, x) => d.mgOk = x)}{N('Margen en riesgo debajo de %', c.mgBajo, (d, x) => d.mgBajo = x)}</div>
       <h3>💲 Calculadora de precios</h3>
@@ -574,14 +604,18 @@ function Config({ s, act }: { s: S; act: Act }) {
         <label>Redondeo<select value={c.redTipo} onChange={e => ed(d => d.redTipo = e.target.value)}>{REDONDEOS.map(r => <option key={r}>{r}</option>)}</select></label>
         {N('Múltiplo $', c.redMult, (d, x) => d.redMult = x)}{N('Margen venta %', c.mv, (d, x) => d.mv = x)}{N('Margen mayorista %', c.mm, (d, x) => d.mm = x)}{N('Descuento %', c.desc, (d, x) => d.desc = x)}</div>
       <h3>Pasarelas de pago</h3>
-      {c.pasarelas.map((x, i) => <div className="form" key={i}><label>Nombre<input value={x.name} onChange={e => ed(d => d.pasarelas[i].name = e.target.value)} /></label>{N('%', x.pct, (d, v) => d.pasarelas[i].pct = v)}</div>)}
+      {c.pasarelas.map((x, i) => <div className="form" key={i}><label>Nombre<input value={x.name} onChange={e => ed(d => d.pasarelas[i].name = e.target.value)} /></label>{N('%', x.pct, (d, v) => d.pasarelas[i].pct = v)}
+        <div style={{ alignSelf: 'end' }}><button onClick={() => ed(d => { d.pasarelas.splice(i, 1); CUOTAS.forEach(n => d.cuotas[n].splice(i, 1)); })}>✕</button></div></div>)}
+      <div className="pills"><button onClick={() => ed(d => { d.pasarelas.push({ name: '', pct: 0 }); CUOTAS.forEach(n => d.cuotas[n].push(0)); })}>➕ Agregar pasarela</button></div>
+      <p className="mut">Las pasarelas aparecen automáticamente en el selector de la Registradora. Guardá la configuración para que se apliquen.</p>
       <h3>Plataformas</h3>
       {c.plataformas.map((x, i) => <div className="form" key={i}><label>Nombre<input value={x.name} onChange={e => ed(d => d.plataformas[i].name = e.target.value)} /></label>{N('%', x.pct, (d, v) => d.plataformas[i].pct = v)}</div>)}
       <h3>Recargos por cuotas (%)</h3>
-      <div className="scroll"><table><thead><tr><th>Cuotas</th>{c.pasarelas.map(x => <th key={x.name}>{x.name}</th>)}</tr></thead><tbody>
+      <div className="scroll"><table><thead><tr><th>Cuotas</th>{c.pasarelas.map((x, i) => <th key={i}>{x.name || '(sin nombre)'}</th>)}</tr></thead><tbody>
         {CUOTAS.map(n => <tr key={n}><td>{n} cuotas</td>{c.cuotas[n].map((v, i) => <td key={i}><input type="number" style={{ width: 80 }} value={v} onChange={e => ed(d => d.cuotas[n][i] = +e.target.value)} /></td>)}</tr>)}</tbody></table></div>
       <div className="pills"><button className="p" onClick={() => act(n => {
         if ([...c.pasarelas, ...c.plataformas].some(x => !x.name.trim())) return 'Todas las pasarelas y plataformas necesitan un nombre.';
+        if (new Set(c.pasarelas.map(x => x.name.trim().toLowerCase())).size !== c.pasarelas.length) return 'Hay pasarelas con el mismo nombre.';
         if (c.mgBajo > c.mgOk) return 'El margen «en riesgo» no puede superar al «saludable».';
         n.cfg = c; n.medios = medios; return null; }, 'Configuración guardada.')}>Guardar configuración</button>
         <button onClick={() => act(n => { for (const q of n.prods) if (q.cost > 0) { const r = calcPrecio(q.cost, n.cfg.mv, n.cfg, selDefault); if (r) q.price = r.lista; } return null; }, 'Precios recalculados con el margen de venta, Ing. Brutos y retenciones.')}>Recalcular todos los productos</button></div>
