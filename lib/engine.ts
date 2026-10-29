@@ -8,7 +8,8 @@ export type Pago = { medio: string; monto: number };
 export type Tx = { id: number; type: Tipo; desc: string; amount: number; costAmt: number; medio: string; status: St;
   due?: string; at: string; items: Item[]; void: boolean; paidBy?: number; pays?: number; disc: number; iva?: number; prov?: string;
   rec?: number; split?: Pago[]; // rec = recargo trasladado al cliente · split = pago mixto
-  comAbs?: number; comTras?: number; pas?: string; cuotas?: number; plat?: string }; // comAbs = comisión que absorbe el comercio (gasto) · comTras = comisión trasladada que la pasarela/plataforma retiene al cobrar · plat = canal de venta (plataforma)
+  comAbs?: number; comTras?: number; pas?: string; cuotas?: number; plat?: string; libera?: string }; // libera = fecha en que la plataforma libera los fondos (si es futura: «fondos en tránsito»)
+ // comAbs = comisión que absorbe el comercio (gasto) · comTras = comisión trasladada que la pasarela/plataforma retiene al cobrar · plat = canal de venta (plataforma)
 export type Turno = { id: number; abre: string; cierra?: string; inicial: Record<string, number>; nota: string;
   esperado?: Record<string, number>; contado?: Record<string, number>; cierreNota?: string };
 export type Mov = { id: number; turno: number; at: string; tipo: 'IN' | 'OUT'; medio: string; monto: number; desc: string; void: boolean };
@@ -24,6 +25,14 @@ const now = () => new Date().toISOString();
 const r2 = (x: number) => Math.round(x * 100) / 100;
 export const medioTipo = (s: S, n: string) => s.medios.find(m => m.name === n)?.tipo ?? 'banco';
 const prod = (s: S, id: number) => s.prods.find(p => p.id === id);
+
+// % seguro para fórmulas: vacío, NaN, negativo, 0 o ≥ 100 → 0 (sin cargo); tope 95 para no dividir por casi cero
+export const pctSeguro = (x: number | undefined | null) => (typeof x === 'number' && Number.isFinite(x) && x > 0 && x < 100 ? Math.min(x, 95) : 0);
+// Gross-up: monto / (1 − %). Con % inválido o 0 devuelve el monto sin tocar (nunca divide por cero ni da NaN/Infinity)
+export const grossUp = (monto: number, pct: number | undefined | null) => {
+  const m = Number.isFinite(monto) ? monto : 0, p = pctSeguro(pct);
+  return p > 0 ? r2(m / (1 - p / 100)) : r2(m);
+};
 
 const CERRADA = 'La caja está cerrada. Abrila en la pestaña Apertura.';
 export const turnoActual = (s: S) => s.turnos[s.turnos.length - 1];
@@ -61,8 +70,8 @@ export const saldo = (s: S, t: Tx) => Math.max(0, r2(t.amount - abonos(s, t.id).
 
 // recargo que se traslada al cliente según la comisión del medio de pago (solo si la config lo pide)
 export function recargoMedio(s: S, medio: string, monto: number) {
-  const c = s.cfg.trasladaCom ? (s.medios.find(m => m.name === medio)?.com ?? 0) : 0;
-  return c > 0 && c < 100 ? r2(monto / (1 - c / 100) - monto) : 0;
+  const c = s.cfg.trasladaCom ? pctSeguro(s.medios.find(m => m.name === medio)?.com) : 0;
+  return c > 0 ? r2(grossUp(monto, c) - monto) : 0;
 }
 
 // Recargo de una pasarela + cuotas. Respeta los switches de Configuración:
@@ -70,12 +79,12 @@ export function recargoMedio(s: S, medio: string, monto: number) {
 export function recargoPasarela(s: S, pas: number, cuotas: number, monto: number) {
   const pa = s.cfg.pasarelas[pas - 1];
   if (!pa) return { rec: 0, abs: 0, cliente: monto, pctCom: 0, pctCuo: 0, pctT: 0 };
-  const pctCuo = cuotas > 1 ? (s.cfg.cuotas[cuotas]?.[pas - 1] ?? 0) : 0;
-  const tCom = s.cfg.trasladaCom ? pa.pct : 0, tCuo = s.cfg.trasladaCuotas ? pctCuo : 0;
-  const pctT = Math.min(tCom + tCuo, 95);
-  const cliente = pctT > 0 ? r2(monto / (1 - pctT / 100)) : monto;
-  const abs = r2((s.cfg.trasladaCom ? 0 : monto * pa.pct / 100) + (s.cfg.trasladaCuotas ? 0 : monto * pctCuo / 100));
-  return { rec: r2(cliente - monto), abs, cliente, pctCom: pa.pct, pctCuo, pctT };
+  const pCom = pctSeguro(pa.pct), pCuo = cuotas > 1 ? pctSeguro(s.cfg.cuotas[cuotas]?.[pas - 1]) : 0;
+  const tCom = s.cfg.trasladaCom ? pCom : 0, tCuo = s.cfg.trasladaCuotas ? pCuo : 0;
+  const pctT = pctSeguro(tCom + tCuo);
+  const cliente = grossUp(monto, pctT);
+  const abs = r2((s.cfg.trasladaCom ? 0 : monto * pCom / 100) + (s.cfg.trasladaCuotas ? 0 : monto * pCuo / 100));
+  return { rec: r2(cliente - monto), abs, cliente, pctCom: pCom, pctCuo: pCuo, pctT };
 }
 
 // Comisión de una plataforma / e-commerce (canal de venta: MercadoLibre, Tienda Nube, Shopify…)
@@ -83,13 +92,13 @@ export function recargoPasarela(s: S, pas: number, cuotas: number, monto: number
 // · Trasladar OFF: el ticket queda en bruto; la plataforma retiene la comisión → se acredita el neto y la diferencia es gasto.
 export function recargoPlataforma(s: S, plat: number, monto: number) {
   const pl = s.cfg.plataformas[plat - 1];
-  if (!pl) return { rec: 0, abs: 0, cliente: monto, pct: 0 };
-  const pct = Math.min(pl.pct, 95);
+  const pct = pctSeguro(pl?.pct); // vacío / 0 / inválido → 0: sin recargo ni comisión, sin divisiones por cero
+  if (!pl || pct === 0) return { rec: 0, abs: 0, cliente: monto, pct: 0 };
   if (s.cfg.trasladaCom) {
-    const cliente = pct > 0 ? r2(monto / (1 - pct / 100)) : monto;
-    return { rec: r2(cliente - monto), abs: 0, cliente, pct: pl.pct };
+    const cliente = grossUp(monto, pct);
+    return { rec: r2(cliente - monto), abs: 0, cliente, pct };
   }
-  return { rec: 0, abs: r2(monto * pct / 100), cliente: monto, pct: pl.pct };
+  return { rec: 0, abs: r2(monto * pct / 100), cliente: monto, pct };
 }
 
 // Las pasarelas no son cuentas propias: su plata cae en la primera cuenta tipo banco
@@ -138,7 +147,7 @@ export function venta(s: S, cart: Record<number, number>, medio: string, st: St,
   }
 
   // canal de venta: plataforma (e-commerce) o pasarela de pago (solo si no es pago mixto)
-  let rec = 0, comAbs = 0, comTras = 0, pasName: string | undefined, platName: string | undefined, pasTxt = '';
+  let rec = 0, comAbs = 0, comTras = 0, pasName: string | undefined, platName: string | undefined, pasTxt = '', libera: string | undefined;
   if (parts) rec = r2(parts.reduce((a, p) => a + p.monto, 0) - total);
   else if (plat > 0) {
     const pl = s.cfg.plataformas[plat - 1];
@@ -146,6 +155,11 @@ export function venta(s: S, cart: Record<number, number>, medio: string, st: St,
     const r = recargoPlataforma(s, plat, total);
     rec = r.rec; comAbs = r.abs; comTras = r.rec; platName = pl.name; medio = pl.name; st = 'PAID'; due = undefined;
     pasTxt = ` · Canal ${pl.name}`;
+    const dd = Number(pl.dias); // demora de liberación de fondos: queda «en tránsito» hasta cumplirse el plazo
+    if (s.cfg.demoraFondos && Number.isFinite(dd) && dd > 0) {
+      libera = new Date(+new Date(at) + dd * 864e5).toISOString();
+      pasTxt += ` · Fondos en tránsito ${dd} día${dd === 1 ? '' : 's'}`;
+    }
   } else if (pas > 0) {
     const pa = s.cfg.pasarelas[pas - 1];
     if (!pa) return 'La pasarela elegida ya no existe en Configuración.';
@@ -160,7 +174,7 @@ export function venta(s: S, cart: Record<number, number>, medio: string, st: St,
       + (parts ? ` · Mixto: ${parts.map(p => `${p.medio} ${money(p.monto)}`).join(' + ')}` : '') + pasTxt
       + (rec ? ` · Recargo ${platName ? 'plataforma' : pasName ? 'pasarela' : 'medio'} ${money(rec)}` : '') + (comAbs ? ` · ${platName ? 'Comisión por Plataforma' : 'Comisión absorbida'} ${money(comAbs)}` : '') + (nota ? ` — ${nota}` : ''),
     amount: r2(total + rec), costAmt: costo, medio, status: st, at, items, disc, iva, rec: rec || undefined, split: parts,
-    comAbs: comAbs || undefined, comTras: comTras || undefined, pas: pasName, plat: platName, cuotas: pasName && cuotas > 1 ? cuotas : undefined }, due);
+    comAbs: comAbs || undefined, comTras: comTras || undefined, pas: pasName, plat: platName, libera, cuotas: pasName && cuotas > 1 ? cuotas : undefined }, due);
   return null;
 }
 
@@ -381,6 +395,19 @@ export function eliminarCombo(s: S, id: number): string | null {
   s.prods = s.prods.filter(p => p.id !== id); return null;
 }
 
+/* ───────── Fondos en tránsito (ventas por plataforma) ───────── */
+// neto real de una venta = total cobrado − comisión absorbida − comisión trasladada que retiene la pasarela/plataforma
+export const neto = (t: Tx) => r2(t.amount - (t.comAbs ?? 0) - (t.comTras ?? 0));
+export const enTransito = (t: Tx) => !t.void && t.type === 'SALE' && !!t.libera && +new Date(t.libera) > Date.now();
+export const transito = (s: S) => r2(s.txs.filter(enTransito).reduce((a, t) => a + neto(t), 0));
+// Simulación: adelanta el paso del tiempo y libera ahora los fondos de una venta
+export function liberarAhora(s: S, id: number): string | null {
+  if (!abierta(s)) return CERRADA;
+  const t = s.txs.find(x => x.id === id);
+  if (!t || !enTransito(t)) return 'Esos fondos ya fueron liberados.';
+  t.libera = now(); return null;
+}
+
 type Cat = 'cobros' | 'compras' | 'gastos';
 export function flows(s: S) {
   const o: { d: Date; c: Cat; a: number; m: string }[] = [];
@@ -389,7 +416,8 @@ export function flows(s: S) {
     const d = new Date(t.at), paid = t.status === 'PAID', liq = t.paidBy != null;
     if (t.type === 'SALE' && paid && !liq) {
       if (t.split) t.split.forEach(p => o.push({ d, c: 'cobros', a: p.monto, m: p.medio })); // pago mixto
-      else o.push({ d, c: 'cobros', a: t.amount - (t.comAbs ?? 0) - (t.comTras ?? 0), m: cuentaDe(s, t.medio) }); // ingreso neto real: menos la comisión que retiene la pasarela/plataforma
+      else if (t.libera) { const dl = new Date(t.libera); if (+dl <= Date.now()) o.push({ d: dl, c: 'cobros', a: neto(t), m: cuentaDe(s, t.medio) }); } // plataforma: entra al banco recién al liberarse
+      else o.push({ d, c: 'cobros', a: neto(t), m: cuentaDe(s, t.medio) }); // ingreso neto real: menos la comisión que retiene la pasarela/plataforma
     }
     else if (t.type === 'COLLECTION') o.push({ d, c: 'cobros', a: t.amount, m: t.medio });
     else if (t.type === 'PAYMENT') o.push({ d, c: s.txs.find(x => x.id === t.pays)?.type === 'PURCHASE' ? 'compras' : 'gastos', a: t.amount, m: t.medio });
@@ -455,6 +483,7 @@ export function seed(): S {
   venta(s, { 3: 2, 1: 4 }, 'Efectivo', 'PAID', undefined, '', 0, ago(26));
   venta(s, { 3: 1, 1: 2 }, 'Efectivo', 'PAID', undefined, '', 0, ago(5));
   venta(s, { 2: 2, 6: 2 }, 'Mercado Pago', 'PAID', undefined, '', 0, ago(4));
+  venta(s, { 3: 2 }, '', 'PAID', undefined, 'Venta online de ejemplo', 0, ago(30), 0, false, undefined, 0, 1, 1); // MercadoLibre → fondos en tránsito
   venta(s, { 5: 3, 4: 3 }, 'Efectivo', 'PAID', undefined, '', 0, ago(3));
   venta(s, { 3: 4, 1: 6 }, 'Fiado / Cta Corriente', 'PENDING', day(7), 'Estudio Pérez', 0, ago(2));
   gasto(s, [{ cat: 'Servicios', desc: 'Luz y gas', monto: 18500 }], 'Efectivo', 'PAID', undefined, '', 21, true, ago(1));
@@ -472,20 +501,21 @@ export function ivaRes(s: S, f: (d: Date) => boolean) {
 
 export type Neg = { nombre: string; cuit: string; tel: string; dir: string; email: string };
 export type Cfg = { packaging: number; envio: number; comision: number; iibb: number; retenciones: number; redTipo: string; redMult: number;
-  pasarelas: { name: string; pct: number }[]; plataformas: { name: string; pct: number }[]; cuotas: Record<number, number[]>;
+  pasarelas: { name: string; pct: number }[]; plataformas: { name: string; pct: number; dias?: number }[]; cuotas: Record<number, number[]>; // dias = días estimados de liberación de fondos
   mv: number; mm: number; desc: number;
   mgOk: number; mgBajo: number;            // semáforo de rentabilidad (margen %)
   trasladaCom: boolean;                    // comisión de pasarela/plataforma/medio de pago: la paga el cliente
   trasladaCuotas: boolean;                 // recargo por cuotas: lo paga el cliente
+  demoraFondos: boolean;                   // simular demora en la liberación de fondos de las plataformas
   bloqueaMin: boolean };                   // bloquear ventas de productos bajo el stock mínimo
 export const REDONDEOS = ['Ninguno', 'Múltiplo', 'Psicológico (990/999)'];
 export const CUOTAS = [2, 3, 6, 12];
 export function cfgDefault(): Cfg {
   return { packaging: 100, envio: 200, comision: 5, iibb: 3, retenciones: 2, redTipo: REDONDEOS[2], redMult: 10,
     pasarelas: [{ name: 'Mercado Pago', pct: 7 }, { name: 'PayU', pct: 3.5 }, { name: 'Stripe', pct: 2.9 }],
-    plataformas: [{ name: 'MercadoLibre', pct: 4 }, { name: 'Tienda Nube', pct: 3 }, { name: 'Shopify', pct: 2 }],
+    plataformas: [{ name: 'MercadoLibre', pct: 4, dias: 10 }, { name: 'Tienda Nube', pct: 3, dias: 14 }, { name: 'Shopify', pct: 2, dias: 2 }], // días: valores de ejemplo, editalos en Configuración
     cuotas: { 2: [11, 7, 9], 3: [15, 12, 16], 6: [30, 27, 32], 12: [70, 60, 68] }, mv: 30, mm: 15, desc: 0,
-    mgOk: 30, mgBajo: 15, trasladaCom: false, trasladaCuotas: false, bloqueaMin: false };
+    mgOk: 30, mgBajo: 15, trasladaCom: false, trasladaCuotas: false, bloqueaMin: false, demoraFondos: true };
 }
 export type Sel = { pack: boolean; envio: boolean; com: boolean; iibb: boolean; ret: boolean; pas: number; plat: number; desc: number };
 export const selDefault: Sel = { pack: false, envio: false, com: false, iibb: true, ret: true, pas: 0, plat: 0, desc: 0 };
