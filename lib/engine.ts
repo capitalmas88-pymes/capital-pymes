@@ -8,7 +8,8 @@ export type Pago = { medio: string; monto: number };
 export type Tx = { id: number; type: Tipo; desc: string; amount: number; costAmt: number; medio: string; status: St;
   due?: string; at: string; items: Item[]; void: boolean; paidBy?: number; pays?: number; disc: number; iva?: number; prov?: string;
   rec?: number; split?: Pago[]; // rec = recargo trasladado al cliente · split = pago mixto
-  comAbs?: number; comTras?: number; pas?: string; cuotas?: number; plat?: string; libera?: string }; // libera = fecha en que la plataforma libera los fondos (si es futura: «fondos en tránsito»)
+  comAbs?: number; comTras?: number; pas?: string; cuotas?: number; plat?: string; libera?: string; // libera = fecha en que la plataforma libera los fondos (si es futura: «fondos en tránsito»)
+  cid?: number }; // cid = contacto (cliente / proveedor) vinculado
  // comAbs = comisión que absorbe el comercio (gasto) · comTras = comisión trasladada que la pasarela/plataforma retiene al cobrar · plat = canal de venta (plataforma)
 export type Turno = { id: number; abre: string; cierra?: string; inicial: Record<string, number>; nota: string;
   esperado?: Record<string, number>; contado?: Record<string, number>; cierreNota?: string };
@@ -18,7 +19,7 @@ export type RLn = { iid: number; qty: number; merma?: number }; // merma % propi
 export type Receta = { id: number; name: string; lote: number; unidad: string; ins: RLn[]; mo: number; cf: number; merma: number; pid: number };
 export type Fab = { id: number; rid: number; qty: number; at: string; costoU: number; desc: boolean };
 export type S = { prods: Prod[]; txs: Tx[]; medios: Medio[]; caja0: number; banco0: number; seq: number; cfg: Cfg; neg: Neg;
-  turnos: Turno[]; movs: Mov[]; insumos: Insumo[]; recetas: Receta[]; fabs: Fab[] };
+  turnos: Turno[]; movs: Mov[]; insumos: Insumo[]; recetas: Receta[]; fabs: Fab[]; contactos: Contacto[] };
 
 export const money = (v: number) => (v < 0 ? '-' : '') + '$' + Math.abs(Math.round(v)).toLocaleString('es-AR');
 const now = () => new Date().toISOString();
@@ -458,6 +459,11 @@ export const por = (s: S, tipos: Tipo[]) => s.txs.filter(t => !t.void && t.statu
 export function seed(): S {
   const s: S = { seq: 0, cfg: cfgDefault(), neg: { nombre: '', cuit: '', tel: '', dir: '', email: '' }, caja0: 60000, banco0: 600000, txs: [],
     turnos: [], movs: [],
+    contactos: [
+      { id: 1, tipo: 'CLI', name: 'Oficina García', doc: '30-71234567-8', tel: '351 555-0101', email: '', dir: '' },
+      { id: 2, tipo: 'CLI', name: 'Estudio Pérez', doc: '20-23456789-3', tel: '351 555-0102', email: '', dir: '' },
+      { id: 3, tipo: 'PROV', name: 'Distribuidora Sur', doc: '30-65432109-5', tel: '351 555-0201', email: '', dir: '' },
+      { id: 4, tipo: 'PROV', name: 'Inmobiliaria Centro', doc: '30-11223344-6', tel: '351 555-0202', email: '', dir: '' }],
     insumos: [
       { id: 1, name: 'Harina 000', unit: 'kg', stock: 25, min: 10, cost: 900 },
       { id: 2, name: 'Manteca', unit: 'kg', stock: 8, min: 3, cost: 7500 },
@@ -487,6 +493,7 @@ export function seed(): S {
   venta(s, { 5: 3, 4: 3 }, 'Efectivo', 'PAID', undefined, '', 0, ago(3));
   venta(s, { 3: 4, 1: 6 }, 'Fiado / Cta Corriente', 'PENDING', day(7), 'Estudio Pérez', 0, ago(2));
   gasto(s, [{ cat: 'Servicios', desc: 'Luz y gas', monto: 18500 }], 'Efectivo', 'PAID', undefined, '', 21, true, ago(1));
+  s.txs.forEach(t => { const c = s.contactos.find(k => t.desc.includes(k.name) || t.prov === k.name); if (c) t.cid = c.id; });
   return s;
 }
 
@@ -569,4 +576,44 @@ export function calcInverso(costo: number, precio: number, c: Cfg, sel: Sel, cuo
   const ganancia = final - base - ded.filter(x => !x[3]).reduce((a, x) => a + x[1], 0);
   return { costo, fijos, base, lista: precio, final, cliente, recargo: cliente - final, d, descMonto: precio - final, ded, ganancia,
     real: final ? ganancia / final * 100 : 0, markup: base > 0 ? ganancia / base * 100 : 0 };
+}
+
+/* ───────── Clientes y proveedores ───────── */
+export type Contacto = { id: number; tipo: 'CLI' | 'PROV'; name: string; doc: string; tel: string; email: string; dir: string };
+const tiposDe = (c: Contacto): Tipo[] => (c.tipo === 'CLI' ? ['SALE'] : ['PURCHASE', 'EXPENSE']);
+export const pendientesDe = (s: S, c: Contacto) => s.txs.filter(t => t.cid === c.id && !t.void && t.status === 'PENDING' && tiposDe(c).includes(t.type));
+export const saldoContacto = (s: S, c: Contacto) => r2(pendientesDe(s, c).reduce((a, t) => a + saldo(s, t), 0));
+
+export function nuevoContacto(s: S, tipo: 'CLI' | 'PROV', name: string, doc: string, tel: string, email: string, dir: string): string | null {
+  if (!name.trim()) return 'Poné un nombre.';
+  if (s.contactos.some(c => c.tipo === tipo && c.name.toLowerCase() === name.trim().toLowerCase())) return 'Ya existe un contacto con ese nombre.';
+  if (doc.trim() && s.contactos.some(c => c.tipo === tipo && c.doc.replace(/\D/g, '') === doc.replace(/\D/g, '') && doc.replace(/\D/g, ''))) return 'Ya existe un contacto con ese CUIT/DNI.';
+  s.contactos.push({ id: Math.max(0, ...s.contactos.map(c => c.id)) + 1, tipo, name: name.trim(), doc: doc.trim(), tel: tel.trim(), email: email.trim(), dir: dir.trim() });
+  return null;
+}
+export function eliminarContacto(s: S, id: number): string | null {
+  if (s.txs.some(t => t.cid === id && !t.void)) return 'No se puede eliminar: tiene operaciones registradas.';
+  s.contactos = s.contactos.filter(c => c.id !== id); return null;
+}
+// Vincula la última operación registrada con un contacto (se llama justo después de venta / compra / gasto)
+export function vincular(s: S, cid: number) {
+  if (cid > 0) { const t = s.txs[s.txs.length - 1]; if (t) t.cid = cid; }
+}
+// Cobra / paga a cuenta de un contacto: aplica el monto a los comprobantes más viejos primero (monto vacío = todo)
+export function liquidarContacto(s: S, cid: number, medio: string, monto?: number): string | null {
+  const c = s.contactos.find(x => x.id === cid);
+  if (!c) return 'El contacto no existe.';
+  const pend = pendientesDe(s, c).sort((a, b) => (a.due ?? '9').localeCompare(b.due ?? '9') || a.id - b.id);
+  const total = r2(pend.reduce((a, t) => a + saldo(s, t), 0));
+  if (!(total > 0)) return 'No hay saldo pendiente.';
+  let rest = monto == null ? total : r2(monto);
+  if (!(rest > 0)) return 'El monto debe ser mayor a 0.';
+  if (rest > total + 0.005) return `El monto supera el saldo pendiente (${money(total)}).`;
+  for (const t of pend) {
+    if (rest <= 0.004) break;
+    const pay = Math.min(rest, saldo(s, t));
+    const e = liquidar(s, t.id, medio, pay); if (e) return e;
+    rest = r2(rest - pay);
+  }
+  return null;
 }
