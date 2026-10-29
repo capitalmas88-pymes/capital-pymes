@@ -1,11 +1,12 @@
 'use client';
 import { ReactNode, useEffect, useRef, useState } from 'react';
-import { CUOTAS, Cfg, GLn, Insumo, Ln, Medio, Pago, Prod, REDONDEOS, RLn, S, Sel, St, Tx, abierta, anular, calcInverso, calcIva, calcPrecio, cambiarCostoInsumo, compra, costoReceta, eliminarReceta, fabricar, flows, gasto, impactoCosto, ivaRes, liquidar, money, nuevaReceta, nuevoInsumo, nuevoProd, por, pyl, recargoMedio, recargoPasarela, recargoPlataforma, enTransito, liberarAhora, neto, transito, saldo, saldos, seed, selDefault, stk, venta } from '../lib/engine';
+import { CUOTAS, Cfg, GLn, Insumo, Ln, Medio, Pago, Prod, REDONDEOS, RLn, S, Sel, St, Tx, abierta, anular, calcInverso, calcIva, calcPrecio, cambiarCostoInsumo, compra, costoReceta, eliminarReceta, fabricar, flows, gasto, impactoCosto, ivaRes, liquidar, money, nuevaReceta, nuevoInsumo, nuevoProd, por, pyl, recargoMedio, recargoPasarela, recargoPlataforma, enTransito, liberarAhora, neto, transito, saldo, saldos, seed, selDefault, stk, venta, medioTipo, vincular } from '../lib/engine';
 import { Apertura, Cierre, Combos, EstadoCaja, Movs } from './Extras';
+import { Contactos, PuntoEquilibrio, SelContacto, UltimaVenta, imprimirTicket } from './Extras2';
 
 const MESES = ['Ene', 'Feb', 'Mar', 'Abr', 'May', 'Jun', 'Jul', 'Ago', 'Sep', 'Oct', 'Nov', 'Dic'];
 const CATS = ['Alquiler', 'Sueldos', 'Servicios', 'Impuestos', 'Marketing', 'Mantenimiento', 'Otros'];
-const SECC = { A: '⚡ Registradora exprés', B: '📦 Inventario y costos', F: '📋 Recetas y fabricación', C: '🧾 Historial', D: '📊 Estados financieros', E: '⚙️ Configuración' } as const;
+const SECC = { A: '⚡ Registradora exprés', B: '📦 Inventario y costos', F: '📋 Recetas y fabricación', G: '👥 Clientes y Proveedores', C: '🧾 Historial', D: '📊 Estados financieros', H: '⚖️ Punto de Equilibrio', E: '⚙️ Configuración' } as const;
 type Act = (fn: (n: S) => string | null, ok: string) => boolean;
 type Msg = { k: 'ok' | 'err'; t: string } | null;
 const fecha = (iso: string) => new Date(iso).toLocaleString('es-AR', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' });
@@ -105,6 +106,7 @@ function Venta({ s, act }: { s: S; act: Act }) {
   const [q, setQ] = useState(''); const [nota, setNota] = useState(''); const [pct, setPct] = useState(0);
   const [mixto, setMixto] = useState(false); const [parts, setParts] = useState<Pago[]>([]);
   const [cobrando, setCobrando] = useState(false);
+  const [cid, setCid] = useState(0); const [ult, setUlt] = useState(0);
   const busq = useRef<HTMLInputElement>(null);
   const pg = usePagoVenta(s, () => { setMixto(false); setParts([]); setCobrando(false); }); const iv = useIva();
   const reales = s.medios.filter(m => m.tipo !== 'credito').map(m => m.name);
@@ -142,9 +144,15 @@ function Venta({ s, act }: { s: S; act: Act }) {
 
   const confirmar = () => {
     if (!hayItems || !mixtoOk) { setCobrando(false); return; }
-    const ok = act(n => venta(n, cart, pg.medio, pg.estado, pg.vence, nota.trim(), pct, undefined, iv.pct, iv.inc, mx ? parts : undefined, mx ? 0 : pg.pas, pg.cuotas, mx ? 0 : pg.canal),
-      `Venta registrada por ${money(total + rec)}.`);
-    if (ok) { setCart({}); setNota(''); setPct(0); setMixto(false); setParts([]); }
+    const cli = s.contactos.find(c => c.id === cid);
+    const nid = s.seq + 1; // id que tendrá la venta
+    const ok = act(n => {
+      if (!mx && !pg.canal && !pg.pas && medioTipo(n, pg.medio) === 'credito' && !cli) return 'Para vender a cuenta corriente (fiado) elegí el cliente.';
+      const e = venta(n, cart, pg.medio, pg.estado, pg.vence, nota.trim() || cli?.name || '', pct, undefined, iv.pct, iv.inc, mx ? parts : undefined, mx ? 0 : pg.pas, pg.cuotas, mx ? 0 : pg.canal);
+      if (!e && cli) vincular(n, cli.id);
+      return e;
+    }, `Venta registrada por ${money(total + rec)}.`);
+    if (ok) { setUlt(nid); setCart({}); setNota(''); setPct(0); setMixto(false); setParts([]); setCid(0); }
     setCobrando(false);
   };
 
@@ -175,6 +183,7 @@ function Venta({ s, act }: { s: S; act: Act }) {
       <p className="mut">⚠️ = bajo el stock mínimo{s.cfg.bloqueaMin ? ' (la configuración bloquea su venta)' : ' (se puede vender, pero con aviso)'}.</p>
     </div>
     <div>
+      {ult > 0 && <UltimaVenta s={s} id={ult} onClose={() => setUlt(0)} />}
       <h3>Ticket actual</h3>
       {!hayItems && <p className="mut">Tocá un producto para agregarlo.</p>}
       {Object.entries(cart).map(([id, n]) => { const p = s.prods.find(x => x.id === +id)!; const bajo = stk(s, p) < p.min; return (
@@ -191,6 +200,7 @@ function Venta({ s, act }: { s: S; act: Act }) {
       <div className="form">
         {mx ? null : pg.ui}{iv.ui}
         <label>Cliente / nota<input value={nota} onChange={e => setNota(e.target.value)} /></label>
+        <SelContacto s={s} tipo="CLI" value={cid} onChange={id => setCid(id)} />
         <label>Descuento %<input type="number" min={0} max={100} value={pct} onChange={e => setPct(+e.target.value)} /></label></div>
 
       {!pg.canal && <label style={{ ...chkSt, margin: '8px 0' }}><input type="checkbox" style={{ width: 'auto' }} checked={mixto} onChange={e => activarMixto(e.target.checked)} />💳 Pago mixto (combinar medios)</label>}
@@ -224,7 +234,7 @@ function Totales({ sub, pct, inc }: { sub: number; pct: number; inc: boolean }) 
 
 function Compra({ s, act }: { s: S; act: Act }) {
   const comprables = s.prods.filter(p => !p.combo);
-  const [lines, setLines] = useState<Ln[]>([]); const [prov, setProv] = useState('');
+  const [lines, setLines] = useState<Ln[]>([]); const [prov, setProv] = useState(''); const [cid, setCid] = useState(0);
   const [esIns, setEs] = useState(false);
   const lista: (Prod | Insumo)[] = esIns ? s.insumos : comprables;
   const [pid0, setPid] = useState(0); const [qty, setQty] = useState(1); const [costo, setCosto] = useState(0);
@@ -265,13 +275,13 @@ function Compra({ s, act }: { s: S; act: Act }) {
     {lines.map((l, i) => (<div className="row" key={i}><span><b>{l.qty}×</b> {l.ins ? '🧂 ' : ''}{nom(l)}</span>
       <span>{money(l.qty * l.cost)} <button onClick={() => setLines(lines.filter((_, k) => k !== i))}>✕</button></span></div>))}
     {!!lines.length && <Totales sub={sub} pct={iv.pct} inc={iv.inc} />}
-    <div className="form"><label>Proveedor<input value={prov} onChange={e => setProv(e.target.value)} placeholder="Ej: Distribuidora Sur" /></label>{pg.ui}{iv.ui}</div>
-    <button className="p" disabled={!lines.length} onClick={() => { if (act(n => compra(n, lines, pg.medio, pg.estado, pg.vence, prov.trim(), iv.pct, iv.inc), 'Compra registrada.')) { setLines([]); setProv(''); } }}>Registrar compra</button>
+    <div className="form"><SelContacto s={s} tipo="PROV" value={cid} onChange={(id, nm) => { setCid(id); if (id) setProv(nm); }} /><label>Proveedor<input value={prov} onChange={e => setProv(e.target.value)} placeholder="Ej: Distribuidora Sur" /></label>{pg.ui}{iv.ui}</div>
+    <button className="p" disabled={!lines.length} onClick={() => { if (act(n => { const e = compra(n, lines, pg.medio, pg.estado, pg.vence, prov.trim(), iv.pct, iv.inc); if (!e) vincular(n, cid); return e; }, 'Compra registrada.')) { setLines([]); setProv(''); setCid(0); } }}>Registrar compra</button>
     <p className="mut">Suma stock y recalcula el costo promedio ponderado. Los insumos suman al stock de insumos. Con IVA incluido, el costo se guarda sin IVA.</p></>);
 }
 
 function Gasto({ s, act }: { s: S; act: Act }) {
-  const [lines, setLines] = useState<GLn[]>([]); const [prov, setProv] = useState('');
+  const [lines, setLines] = useState<GLn[]>([]); const [prov, setProv] = useState(''); const [cid, setCid] = useState(0);
   const [cat, setCat] = useState(CATS[0]); const [desc, setDesc] = useState(''); const [monto, setMonto] = useState(0);
   const pg = usePago(s); const iv = useIva();
   const sub = lines.reduce((a, l) => a + l.monto, 0);
@@ -287,8 +297,8 @@ function Gasto({ s, act }: { s: S; act: Act }) {
     {lines.map((l, i) => (<div className="row" key={i}><span><b>{l.cat}</b>{l.desc && `: ${l.desc}`}</span>
       <span>{money(l.monto)} <button onClick={() => setLines(lines.filter((_, k) => k !== i))}>✕</button></span></div>))}
     {!!lines.length && <Totales sub={sub} pct={iv.pct} inc={iv.inc} />}
-    <div className="form"><label>Proveedor<input value={prov} onChange={e => setProv(e.target.value)} placeholder="Ej: Edenor" /></label>{pg.ui}{iv.ui}</div>
-    <button className="p" disabled={!lines.length} onClick={() => { if (act(n => gasto(n, lines, pg.medio, pg.estado, pg.vence, prov.trim(), iv.pct, iv.inc), 'Gasto registrado.')) { setLines([]); setProv(''); } }}>Registrar gasto</button>
+    <div className="form"><SelContacto s={s} tipo="PROV" value={cid} onChange={(id, nm) => { setCid(id); if (id) setProv(nm); }} /><label>Proveedor<input value={prov} onChange={e => setProv(e.target.value)} placeholder="Ej: Edenor" /></label>{pg.ui}{iv.ui}</div>
+    <button className="p" disabled={!lines.length} onClick={() => { if (act(n => { const e = gasto(n, lines, pg.medio, pg.estado, pg.vence, prov.trim(), iv.pct, iv.inc); if (!e) vincular(n, cid); return e; }, 'Gasto registrado.')) { setLines([]); setProv(''); setCid(0); } }}>Registrar gasto</button>
     <p className="mut">El IVA sale de la caja pero no cuenta como gasto en el estado de resultados.</p></>);
 }
 
@@ -450,7 +460,7 @@ function ModC({ s, act }: { s: S; act: Act }) {
         <td style={cobrable(t) ? { cursor: 'pointer' } : undefined} onClick={() => cobrable(t) && setAbId(t.id)} title={cobrable(t) ? 'Click para registrar un cobro o pago' : ''}>
           {t.void ? '❌ Anulada' : t.status === 'PAID' ? (enTransito(t) ? `🚚 En tránsito · libera ${new Date(t.libera!).toLocaleDateString('es-AR', { day: '2-digit', month: '2-digit' })}` : '✅ Pagado') : venc(t) ? '⚠️ Vencida' : '⏳ Pendiente'}{parcial ? ` · saldo ${money(sd)}` : ''}</td>
         <td className={ING.includes(t.type) ? 'pos' : ''}>{ING.includes(t.type) ? '+' : '−'}{money(t.amount)}</td>
-        <td>{cobrable(t) && <button onClick={() => setAbId(t.id)}>{t.type === 'SALE' ? 'Cobrar' : 'Pagar'}</button>}{' '}
+        <td>{t.type === 'SALE' && !t.void && <button onClick={() => imprimirTicket(s, t)} title="Imprimir ticket">🖨️</button>}{' '}{cobrable(t) && <button onClick={() => setAbId(t.id)}>{t.type === 'SALE' ? 'Cobrar' : 'Pagar'}</button>}{' '}
           {!t.void && (conf === t.id
             ? <span><span className="neg">¿Anular #{t.id}? Revierte stock y caja. </span>
               <button className="p" onClick={() => { act(n => anular(n, t.id), `Operación #${t.id} anulada.`); setConf(null); }}>Sí, anular</button>{' '}
@@ -793,5 +803,6 @@ export default function Page() {
       <div className="kpi"><small>📊 Resultado neto del mes</small><strong className={mes.neta < 0 ? 'neg' : 'pos'}>{money(mes.neta)}</strong></div></div>
     <div className="nav">{(Object.keys(SECC) as (keyof typeof SECC)[]).map(k => <button key={k} className={tab === k ? 'on' : ''} onClick={() => setTab(k)}>{SECC[k]}</button>)}</div>
     {tab === 'A' && <ModA s={s} act={act} />}{tab === 'B' && <ModB s={s} act={act} />}{tab === 'F' && <Recetas s={s} act={act} />}{tab === 'C' && <ModC s={s} act={act} />}{tab === 'D' && <ModD s={s} />}{tab === 'E' && <Config s={s} act={act} upd={upd} />}
+    {tab === 'G' && <Contactos s={s} act={act} />}{tab === 'H' && <PuntoEquilibrio s={s} />}
     {msg && <div className={'toast ' + (msg.k === 'err' ? 'err' : '')}>{msg.t}</div>}</div>);
 }
