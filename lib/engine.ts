@@ -3,13 +3,13 @@ export type St = 'PAID' | 'PENDING';
 export type Prod = { id: number; name: string; stock: number; min: number; cost: number; price: number;
   combo?: { pid: number; qty: number }[]; notes?: string };
 export type Medio = { name: string; tipo: 'caja' | 'banco' | 'credito'; com?: number }; // com = comisión % del medio
-export type Item = { pid: number; name: string; qty: number; price: number; cost: number; ins?: boolean };
+export type Item = { pid: number; name: string; qty: number; price: number; cost: number; ins?: boolean; hh?: number }; // hh = % de Happy Hour aplicado a la línea
 export type Pago = { medio: string; monto: number };
 export type Tx = { id: number; type: Tipo; desc: string; amount: number; costAmt: number; medio: string; status: St;
   due?: string; at: string; items: Item[]; void: boolean; paidBy?: number; pays?: number; disc: number; iva?: number; prov?: string;
   rec?: number; split?: Pago[]; // rec = recargo trasladado al cliente · split = pago mixto
   comAbs?: number; comTras?: number; pas?: string; cuotas?: number; plat?: string; libera?: string; // libera = fecha en que la plataforma libera los fondos (si es futura: «fondos en tránsito»)
-  cid?: number }; // cid = contacto (cliente / proveedor) vinculado
+  cid?: number; hh?: number; ptsGan?: number; ptsUsa?: number; ptsDesc?: number }; // cid = contacto (cliente / proveedor) vinculado · hh = $ Happy Hour · pts* = puntos ganados / usados / $ descontados por puntos
  // comAbs = comisión que absorbe el comercio (gasto) · comTras = comisión trasladada que la pasarela/plataforma retiene al cobrar · plat = canal de venta (plataforma)
 export type Turno = { id: number; abre: string; cierra?: string; inicial: Record<string, number>; nota: string;
   esperado?: Record<string, number>; contado?: Record<string, number>; cierreNota?: string };
@@ -19,7 +19,7 @@ export type RLn = { iid: number; qty: number; merma?: number }; // merma % propi
 export type Receta = { id: number; name: string; lote: number; unidad: string; ins: RLn[]; mo: number; cf: number; merma: number; pid: number };
 export type Fab = { id: number; rid: number; qty: number; at: string; costoU: number; desc: boolean };
 export type S = { prods: Prod[]; txs: Tx[]; medios: Medio[]; caja0: number; banco0: number; seq: number; cfg: Cfg; neg: Neg;
-  turnos: Turno[]; movs: Mov[]; insumos: Insumo[]; recetas: Receta[]; fabs: Fab[]; contactos: Contacto[] };
+  turnos: Turno[]; movs: Mov[]; insumos: Insumo[]; recetas: Receta[]; fabs: Fab[]; contactos: Contacto[]; envios: Envio[] };
 
 export const money = (v: number) => (v < 0 ? '-' : '') + '$' + Math.abs(Math.round(v)).toLocaleString('es-AR');
 const now = () => new Date().toISOString();
@@ -118,7 +118,7 @@ const sfx = (pct: number, iva: number, inc: boolean, prov: string) =>
   (iva ? ` · IVA ${pct}% ${money(iva)}${inc ? ' incl.' : ''}` : '') + (prov ? ` · Prov. ${prov}` : '');
 
 export function venta(s: S, cart: Record<number, number>, medio: string, st: St, due: string | undefined,
-  nota = '', pct = 0, at = now(), ivaPct = 0, ivaInc = false, split?: Pago[], pas = 0, cuotas = 1, plat = 0): string | null {
+  nota = '', pct = 0, at = now(), ivaPct = 0, ivaInc = false, split?: Pago[], pas = 0, cuotas = 1, plat = 0, cid = 0, canje = 0): string | null {
   if (!abierta(s)) return CERRADA;
   const ids = Object.keys(cart).map(Number);
   if (!ids.length) return 'El ticket está vacío.';
@@ -128,13 +128,15 @@ export function venta(s: S, cart: Record<number, number>, medio: string, st: St,
     if (stk(s, p) < cart[id]) return `Stock insuficiente de ${p.name} (hay ${stk(s, p)}).`;
     if (s.cfg.bloqueaMin && stk(s, p) < p.min) return `${p.name} está bajo el stock mínimo y la configuración bloquea su venta.`;
   }
+  const dd = descuentos(s, cart, pct, canje, cid, new Date(at)); // Happy Hour → % manual → canje de puntos
+  if (dd.err) return dd.err;
   const items: Item[] = []; let bruto = 0, costo = 0;
   for (const id of ids) {
-    const p = prod(s, id)!, q = cart[id];
-    items.push({ pid: id, name: p.name, qty: q, price: p.price, cost: p.cost });
+    const p = prod(s, id)!, q = cart[id], hp = hhPct(s, id, new Date(at));
+    items.push({ pid: id, name: p.name, qty: q, price: p.price, cost: p.cost, hh: hp || undefined });
     bruto += q * p.price; costo += q * p.cost;
   }
-  const disc = Math.round(bruto * Math.min(Math.max(pct, 0), 100)) / 100;
+  const disc = r2(dd.hh + dd.man + dd.pts);
   const { total, iva } = calcIva(bruto - disc, ivaPct, ivaInc);
 
   // pago mixto: los montos (sin recargo) deben sumar el total de la venta
@@ -156,10 +158,10 @@ export function venta(s: S, cart: Record<number, number>, medio: string, st: St,
     const r = recargoPlataforma(s, plat, total);
     rec = r.rec; comAbs = r.abs; comTras = r.rec; platName = pl.name; medio = pl.name; st = 'PAID'; due = undefined;
     pasTxt = ` · Canal ${pl.name}`;
-    const dd = Number(pl.dias); // demora de liberación de fondos: queda «en tránsito» hasta cumplirse el plazo
-    if (s.cfg.demoraFondos && Number.isFinite(dd) && dd > 0) {
-      libera = new Date(+new Date(at) + dd * 864e5).toISOString();
-      pasTxt += ` · Fondos en tránsito ${dd} día${dd === 1 ? '' : 's'}`;
+    const dd2 = Number(pl.dias); // demora de liberación de fondos: queda «en tránsito» hasta cumplirse el plazo
+    if (s.cfg.demoraFondos && Number.isFinite(dd2) && dd2 > 0) {
+      libera = new Date(+new Date(at) + dd2 * 864e5).toISOString();
+      pasTxt += ` · Fondos en tránsito ${dd2} día${dd2 === 1 ? '' : 's'}`;
     }
   } else if (pas > 0) {
     const pa = s.cfg.pasarelas[pas - 1];
@@ -171,10 +173,12 @@ export function venta(s: S, cart: Record<number, number>, medio: string, st: St,
   } else rec = recargoMedio(s, medio, total);
 
   ids.forEach(id => mueve(s, prod(s, id)!, -cart[id]));
-  push(s, { type: 'SALE', desc: items.map(i => `${i.qty}× ${i.name}`).join(', ') + (disc ? ` (desc. ${pct}%)` : '') + sfx(ivaPct, iva, ivaInc, '')
+  push(s, { type: 'SALE', desc: items.map(i => `${i.qty}× ${i.name}`).join(', ') + (dd.man ? ` (desc. ${pct}%)` : '') + (dd.hh ? ` · Happy Hour −${money(dd.hh)}` : '') + (dd.pts ? ` · Canje ${canje} pts −${money(dd.pts)}` : '') + sfx(ivaPct, iva, ivaInc, '')
       + (parts ? ` · Mixto: ${parts.map(p => `${p.medio} ${money(p.monto)}`).join(' + ')}` : '') + pasTxt
       + (rec ? ` · Recargo ${platName ? 'plataforma' : pasName ? 'pasarela' : 'medio'} ${money(rec)}` : '') + (comAbs ? ` · ${platName ? 'Comisión por Plataforma' : 'Comisión absorbida'} ${money(comAbs)}` : '') + (nota ? ` — ${nota}` : ''),
-    amount: r2(total + rec), costAmt: costo, medio, status: st, at, items, disc, iva, rec: rec || undefined, split: parts,
+    amount: r2(total + rec), costAmt: costo, medio, status: st, at, items, disc, iva,
+    cid: cid || undefined, hh: dd.hh || undefined, ptsGan: puntosGanados(s, total) || undefined, ptsUsa: canje > 0 ? canje : undefined, ptsDesc: dd.pts || undefined,
+    rec: rec || undefined, split: parts,
     comAbs: comAbs || undefined, comTras: comTras || undefined, pas: pasName, plat: platName, libera, cuotas: pasName && cuotas > 1 ? cuotas : undefined }, due);
   return null;
 }
@@ -463,14 +467,15 @@ export function seed(): S {
       { id: 1, tipo: 'CLI', name: 'Oficina García', doc: '30-71234567-8', tel: '351 555-0101', email: '', dir: '' },
       { id: 2, tipo: 'CLI', name: 'Estudio Pérez', doc: '20-23456789-3', tel: '351 555-0102', email: '', dir: '' },
       { id: 3, tipo: 'PROV', name: 'Distribuidora Sur', doc: '30-65432109-5', tel: '351 555-0201', email: '', dir: '' },
-      { id: 4, tipo: 'PROV', name: 'Inmobiliaria Centro', doc: '30-11223344-6', tel: '351 555-0202', email: '', dir: '' }],
+      { id: 4, tipo: 'PROV', name: 'Inmobiliaria Centro', doc: '30-11223344-6', tel: '351 555-0202', email: '', dir: '' },
+      { id: 5, tipo: 'CLI', name: 'Café del Parque', doc: '', tel: '351 555-0103', email: 'hola@cafedelparque.com', dir: '' }],
     insumos: [
       { id: 1, name: 'Harina 000', unit: 'kg', stock: 25, min: 10, cost: 900 },
       { id: 2, name: 'Manteca', unit: 'kg', stock: 8, min: 3, cost: 7500 },
       { id: 3, name: 'Azúcar', unit: 'kg', stock: 12, min: 5, cost: 1100 }],
     recetas: [{ id: 1, name: 'Medialuna', lote: 12, unidad: 'Unidad', pid: 1, mo: 2000, cf: 500, merma: 5,
       ins: [{ iid: 1, qty: 0.6 }, { iid: 2, qty: 0.3, merma: 8 }, { iid: 3, qty: 0.05 }] }],
-    fabs: [],
+    fabs: [], envios: [],
     medios: [{ name: 'Efectivo', tipo: 'caja' }, { name: 'Mercado Pago', tipo: 'banco' },
       { name: 'Transferencia Bancaria', tipo: 'banco', com: 0 }, { name: 'Fiado / Cta Corriente', tipo: 'credito' }],
     prods: [
@@ -493,7 +498,11 @@ export function seed(): S {
   venta(s, { 5: 3, 4: 3 }, 'Efectivo', 'PAID', undefined, '', 0, ago(3));
   venta(s, { 3: 4, 1: 6 }, 'Fiado / Cta Corriente', 'PENDING', day(7), 'Estudio Pérez', 0, ago(2));
   gasto(s, [{ cat: 'Servicios', desc: 'Luz y gas', monto: 18500 }], 'Efectivo', 'PAID', undefined, '', 21, true, ago(1));
+  // Demo de marketing: cliente que dejó de venir (inactivo + aviso de recompra)
+  venta(s, { 1: 3 }, 'Efectivo', 'PAID', undefined, 'Café del Parque', 0, ago(24 * 75));
+  venta(s, { 1: 3 }, 'Efectivo', 'PAID', undefined, 'Café del Parque', 0, ago(24 * 70));
   s.txs.forEach(t => { const c = s.contactos.find(k => t.desc.includes(k.name) || t.prov === k.name); if (c) t.cid = c.id; });
+  s.contactos[0].cumple = new Date(Date.now() + 3 * 864e5 - 30 * 365 * 864e5).toISOString().slice(0, 10); // cumple en ~3 días
   return s;
 }
 
@@ -514,7 +523,8 @@ export type Cfg = { packaging: number; envio: number; comision: number; iibb: nu
   trasladaCom: boolean;                    // comisión de pasarela/plataforma/medio de pago: la paga el cliente
   trasladaCuotas: boolean;                 // recargo por cuotas: lo paga el cliente
   demoraFondos: boolean;                   // simular demora en la liberación de fondos de las plataformas
-  bloqueaMin: boolean };                   // bloquear ventas de productos bajo el stock mínimo
+  bloqueaMin: boolean;                     // bloquear ventas de productos bajo el stock mínimo
+  fid: Fid; happy: HH[]; camp: Camp };     // marketing: puntos · Happy Hour · parámetros de campañas
 export const REDONDEOS = ['Ninguno', 'Múltiplo', 'Psicológico (990/999)'];
 export const CUOTAS = [2, 3, 6, 12];
 export function cfgDefault(): Cfg {
@@ -522,7 +532,10 @@ export function cfgDefault(): Cfg {
     pasarelas: [{ name: 'Mercado Pago', pct: 7 }, { name: 'PayU', pct: 3.5 }, { name: 'Stripe', pct: 2.9 }],
     plataformas: [{ name: 'MercadoLibre', pct: 4, dias: 10 }, { name: 'Tienda Nube', pct: 3, dias: 14 }, { name: 'Shopify', pct: 2, dias: 2 }], // días: valores de ejemplo, editalos en Configuración
     cuotas: { 2: [11, 7, 9], 3: [15, 12, 16], 6: [30, 27, 32], 12: [70, 60, 68] }, mv: 30, mm: 15, desc: 0,
-    mgOk: 30, mgBajo: 15, trasladaCom: false, trasladaCuotas: false, bloqueaMin: false, demoraFondos: true };
+    mgOk: 30, mgBajo: 15, trasladaCom: false, trasladaCuotas: false, bloqueaMin: false, demoraFondos: true,
+    fid: { activo: true, pesos: 100, valor: 5 },
+    happy: [{ id: 1, name: 'Happy Hour panadería', activo: false, dias: [1, 2, 3, 4, 5], desde: '18:00', hasta: '20:00', pct: 20, pids: [1] }],
+    camp: { diasCumple: 7, diasRecompra: 15, minCompras: 2, diasInactivo: 60, ofertaPct: 10 } };
 }
 export type Sel = { pack: boolean; envio: boolean; com: boolean; iibb: boolean; ret: boolean; pas: number; plat: number; desc: number };
 export const selDefault: Sel = { pack: false, envio: false, com: false, iibb: true, ret: true, pas: 0, plat: 0, desc: 0 };
@@ -579,16 +592,16 @@ export function calcInverso(costo: number, precio: number, c: Cfg, sel: Sel, cuo
 }
 
 /* ───────── Clientes y proveedores ───────── */
-export type Contacto = { id: number; tipo: 'CLI' | 'PROV'; name: string; doc: string; tel: string; email: string; dir: string };
+export type Contacto = { id: number; tipo: 'CLI' | 'PROV'; name: string; doc: string; tel: string; email: string; dir: string; cumple?: string };
 const tiposDe = (c: Contacto): Tipo[] => (c.tipo === 'CLI' ? ['SALE'] : ['PURCHASE', 'EXPENSE']);
 export const pendientesDe = (s: S, c: Contacto) => s.txs.filter(t => t.cid === c.id && !t.void && t.status === 'PENDING' && tiposDe(c).includes(t.type));
 export const saldoContacto = (s: S, c: Contacto) => r2(pendientesDe(s, c).reduce((a, t) => a + saldo(s, t), 0));
 
-export function nuevoContacto(s: S, tipo: 'CLI' | 'PROV', name: string, doc: string, tel: string, email: string, dir: string): string | null {
+export function nuevoContacto(s: S, tipo: 'CLI' | 'PROV', name: string, doc: string, tel: string, email: string, dir: string, cumple = ''): string | null {
   if (!name.trim()) return 'Poné un nombre.';
   if (s.contactos.some(c => c.tipo === tipo && c.name.toLowerCase() === name.trim().toLowerCase())) return 'Ya existe un contacto con ese nombre.';
   if (doc.trim() && s.contactos.some(c => c.tipo === tipo && c.doc.replace(/\D/g, '') === doc.replace(/\D/g, '') && doc.replace(/\D/g, ''))) return 'Ya existe un contacto con ese CUIT/DNI.';
-  s.contactos.push({ id: Math.max(0, ...s.contactos.map(c => c.id)) + 1, tipo, name: name.trim(), doc: doc.trim(), tel: tel.trim(), email: email.trim(), dir: dir.trim() });
+  s.contactos.push({ id: Math.max(0, ...s.contactos.map(c => c.id)) + 1, tipo, name: name.trim(), doc: doc.trim(), tel: tel.trim(), email: email.trim(), dir: dir.trim(), cumple: cumple || undefined });
   return null;
 }
 export function eliminarContacto(s: S, id: number): string | null {
@@ -615,5 +628,142 @@ export function liquidarContacto(s: S, cid: number, medio: string, monto?: numbe
     const e = liquidar(s, t.id, medio, pay); if (e) return e;
     rest = r2(rest - pay);
   }
+  return null;
+}
+
+/* ═════════════════ MARKETING Y FIDELIZACIÓN ═════════════════
+   Modelo de datos
+   · Cfg.fid    { activo, pesos, valor }   → 1 punto cada «pesos» $ · cada punto canjea «valor» $
+   · Cfg.happy  HH[]                        → reglas de descuento por franja horaria
+   · Cfg.camp   Camp                        → parámetros de campañas (cumpleaños, recompra, inactivos)
+   · Contacto.cumple  'YYYY-MM-DD'          → fecha de cumpleaños (opcional)
+   · Tx.hh / ptsGan / ptsUsa / ptsDesc      → descuento Happy Hour, puntos ganados / usados, $ descontados por puntos
+   · Item.hh                                → % de Happy Hour aplicado a esa línea
+   · S.envios   Envio[]                     → bitácora de mensajes enviados (evita repetir avisos)
+   El saldo de puntos NO se guarda: se deriva de las ventas (puntosDe), así anular una venta revierte los puntos solo. */
+
+export type Fid = { activo: boolean; pesos: number; valor: number };
+export type HH = { id: number; name: string; activo: boolean; dias: number[]; desde: string; hasta: string; pct: number; pids: number[] }; // dias: 0=domingo … 6=sábado · pids vacío = todos los productos
+export type Camp = { diasCumple: number; diasRecompra: number; minCompras: number; diasInactivo: number; ofertaPct: number };
+export type Envio = { id: number; cid: number; tipo: 'CUMPLE' | 'RECOMPRA' | 'REACT'; ref: string; at: string };
+
+/* ───────── 5. Happy Hour ───────── */
+const hm = (x: string) => { const [h, m] = x.split(':').map(Number); return (h || 0) * 60 + (m || 0); };
+export const hhRegla = (r: HH, d: Date) => {
+  if (!r.activo || !(r.pct > 0) || !r.dias.includes(d.getDay())) return false;
+  const m = d.getHours() * 60 + d.getMinutes(), a = hm(r.desde), z = hm(r.hasta);
+  return a <= z ? m >= a && m < z : m >= a || m < z; // admite franjas que cruzan la medianoche
+};
+// % de descuento automático de un producto en ese momento (si varias reglas coinciden, gana la mayor)
+export const hhPct = (s: S, pid: number, d = new Date()) =>
+  Math.min(90, Math.max(0, ...s.cfg.happy.filter(r => hhRegla(r, d) && (!r.pids.length || r.pids.includes(pid))).map(r => r.pct)));
+
+/* ───────── 1. Puntos ───────── */
+export const puntosGanados = (s: S, monto: number) => { const f = s.cfg.fid; return f.activo && f.pesos > 0 ? Math.floor(monto / f.pesos) : 0; };
+// Los puntos se acreditan con la venta pagada (el fiado suma recién al cobrarse) y se restan los canjeados
+export const puntosDe = (s: S, cid: number) => Math.max(0, s.txs.reduce((a, t) =>
+  t.cid === cid && !t.void && t.type === 'SALE' ? a + (t.status === 'PAID' ? t.ptsGan ?? 0 : 0) - (t.ptsUsa ?? 0) : a, 0));
+
+// Todos los descuentos de un ticket en orden: Happy Hour → % manual → canje de puntos. Lo usan la UI y venta() para que coincidan.
+export function descuentos(s: S, cart: Record<number, number>, pct: number, canje: number, cid: number, d = new Date()) {
+  let bruto = 0, hh = 0;
+  for (const [id, q] of Object.entries(cart)) {
+    const p = prod(s, +id); if (!p) continue;
+    bruto += q * p.price; hh += q * p.price * hhPct(s, +id, d) / 100;
+  }
+  hh = r2(hh);
+  const man = Math.round((bruto - hh) * Math.min(Math.max(pct || 0, 0), 100)) / 100;
+  const f = s.cfg.fid, resto = r2(bruto - hh - man);
+  const maxPts = f.activo && cid > 0 && f.valor > 0 ? Math.max(0, Math.min(puntosDe(s, cid), Math.floor(resto / f.valor))) : 0;
+  let pts = 0, err: string | null = null;
+  if (canje > 0) {
+    if (!f.activo || cid <= 0) err = 'Para canjear puntos elegí un cliente y activá la fidelización.';
+    else if (!Number.isInteger(canje) || canje > maxPts) err = `Podés canjear hasta ${maxPts} puntos en este ticket.`;
+    else pts = r2(canje * f.valor);
+  }
+  return { bruto, hh, man, pts, maxPts, neto: r2(resto - pts), err };
+}
+
+/* ───────── 2. Recomendación cruzada ───────── */
+export type Sug = { p: Prod; score: number; motivo: string; tipo: 'cli' | 'fav' | 'glob' };
+export function sugerencias(s: S, cart: number[], cid: number, max = 3): Sug[] {
+  const glob: Record<number, number> = {}, cli: Record<number, number> = {}, fav: Record<number, number> = {};
+  for (const t of s.txs) {
+    if (t.void || t.type !== 'SALE') continue;
+    const ids = [...new Set(t.items.map(i => i.pid))], propia = cid > 0 && t.cid === cid;
+    if (propia) ids.forEach(id => { fav[id] = (fav[id] ?? 0) + 1; });
+    if (cart.length && ids.some(id => cart.includes(id)))
+      ids.filter(id => !cart.includes(id)).forEach(id => { glob[id] = (glob[id] ?? 0) + 1; if (propia) cli[id] = (cli[id] ?? 0) + 1; });
+  }
+  return s.prods.filter(p => !cart.includes(p.id) && stk(s, p) > 0 && !(s.cfg.bloqueaMin && stk(s, p) < p.min)).map(p => {
+    const c = cli[p.id] ?? 0, g = glob[p.id] ?? 0, f = fav[p.id] ?? 0;
+    const score = c * 3 + g + (cart.length ? (f >= 2 ? 1 : 0) : f * 3);
+    const tipo: Sug['tipo'] = c > 0 ? 'cli' : (f >= 2 || (!cart.length && f > 0)) ? 'fav' : 'glob';
+    const motivo = tipo === 'cli' ? `lo llevó junto en ${c} compra(s)` : tipo === 'fav' ? `lo compró ${f} vez/veces` : `va junto en ${g} venta(s) del local`;
+    return { p, score, motivo, tipo };
+  }).filter(x => x.score > 0).sort((a, b) => b.score - a.score).slice(0, max);
+}
+
+/* ───────── 3 y 4. Campañas: cumpleaños, recompra, inactivos ───────── */
+const diasDesde = (iso: string) => Math.floor((Date.now() - +new Date(iso)) / 864e5);
+export const ventasDe = (s: S, cid: number) => s.txs.filter(t => t.cid === cid && !t.void && t.type === 'SALE');
+export const ultimaCompra = (s: S, cid: number) => { const v = ventasDe(s, cid); return v.length ? v.reduce((m, t) => (t.at > m ? t.at : m), v[0].at) : null; };
+export const diasSinComprar = (s: S, cid: number) => { const u = ultimaCompra(s, cid); return u ? diasDesde(u) : null; };
+
+// días hasta el próximo cumpleaños (0 = hoy); null si no cargaron la fecha
+export function proxCumple(c: Contacto, hoy = new Date()) {
+  if (!c.cumple) return null;
+  const [, m, d] = c.cumple.split('-').map(Number); if (!m || !d) return null;
+  const h0 = new Date(hoy.getFullYear(), hoy.getMonth(), hoy.getDate());
+  let f = new Date(hoy.getFullYear(), m - 1, d); if (f < h0) f = new Date(hoy.getFullYear() + 1, m - 1, d);
+  return Math.round((+f - +h0) / 864e5);
+}
+
+export type Aviso = { cid: number; tipo: Envio['tipo']; ref: string; dias: number; prod?: string };
+// Cola de mensajes automáticos pendientes (cumpleaños próximos + recompra de productos frecuentes), sin repetir los ya enviados
+export function avisos(s: S, hoy = new Date()): Aviso[] {
+  const cp = s.cfg.camp, out: Aviso[] = [];
+  const hecho = (cid: number, tipo: Envio['tipo'], ref: string) => s.envios.some(e => e.cid === cid && e.tipo === tipo && e.ref === ref);
+  for (const c of s.contactos) {
+    if (c.tipo !== 'CLI') continue;
+    const pc = proxCumple(c, hoy);
+    if (pc != null && pc <= cp.diasCumple) {
+      const ref = String(new Date(+hoy + pc * 864e5).getFullYear());
+      if (!hecho(c.id, 'CUMPLE', ref)) out.push({ cid: c.id, tipo: 'CUMPLE', ref, dias: pc });
+    }
+    const h = new Map<number, { n: number; last: string; name: string }>();
+    for (const t of ventasDe(s, c.id)) {
+      const vistos = new Set<number>();
+      for (const i of t.items) {
+        if (vistos.has(i.pid)) continue; vistos.add(i.pid);
+        const o = h.get(i.pid) ?? { n: 0, last: t.at, name: i.name };
+        o.n++; if (t.at > o.last) o.last = t.at; h.set(i.pid, o);
+      }
+    }
+    h.forEach((o, pid) => {
+      const p = prod(s, pid), ref = `${pid}@${o.last}`;
+      if (p && stk(s, p) > 0 && o.n >= cp.minCompras && diasDesde(o.last) >= cp.diasRecompra && !hecho(c.id, 'RECOMPRA', ref))
+        out.push({ cid: c.id, tipo: 'RECOMPRA', ref, dias: diasDesde(o.last), prod: o.name });
+    });
+  }
+  return out;
+}
+
+export function inactivos(s: S, dias: number) {
+  return s.contactos.filter(c => c.tipo === 'CLI').map(c => ({ c, d: diasSinComprar(s, c.id), gastado: r2(ventasDe(s, c.id).reduce((a, t) => a + t.amount, 0)) }))
+    .filter(x => x.d != null && x.d >= dias).sort((a, b) => (b.d as number) - (a.d as number)) as { c: Contacto; d: number; gastado: number }[];
+}
+
+export const PLANTILLA_REACT = 'Hola {nombre}, ¡te extrañamos en {negocio}! Hace {dias} días que no nos visitás. Con este mensaje tenés {oferta}% de descuento en tu próxima compra. ¡Te esperamos!';
+export function mensaje(s: S, a: Aviso, oferta = s.cfg.camp.ofertaPct, plantilla = PLANTILLA_REACT) {
+  const n = s.contactos.find(x => x.id === a.cid)?.name ?? '', neg = s.neg.nombre || 'nuestro local';
+  if (a.tipo === 'CUMPLE') return `¡Feliz cumpleaños, ${n}! 🎂 Todo el equipo de ${neg} te desea un día genial. ¡Pasá a festejar con nosotros!`;
+  if (a.tipo === 'RECOMPRA') return `Hola ${n}, ¿cómo estás? Hace ${a.dias} días que no te llevás ${a.prod}. ¿Te guardamos uno? Te esperamos en ${neg}. 😉`;
+  return plantilla.replace(/\{nombre\}/g, n).replace(/\{negocio\}/g, neg).replace(/\{dias\}/g, String(a.dias)).replace(/\{oferta\}/g, String(oferta));
+}
+
+export function marcarEnviado(s: S, items: { cid: number; tipo: Envio['tipo']; ref: string }[]): string | null {
+  if (!items.length) return 'No hay clientes seleccionados.';
+  items.forEach(x => s.envios.push({ id: s.envios.length + 1, ...x, at: now() }));
   return null;
 }
