@@ -1,7 +1,8 @@
 'use client';
 // Guardar como app/Extras2.tsx (al lado de page.tsx y Extras.tsx)
 import { useState } from 'react';
-import { S, Tx, Contacto, abierta, abonos, eliminarContacto, liquidarContacto, money, nuevoContacto, pendientesDe, saldo, saldoContacto } from '../lib/engine';
+import { S, Tx, Contacto, abierta, abonos, eliminarContacto, liquidarContacto, money, nuevoContacto, pendientesDe, puntosDe, saldo, saldoContacto } from '../lib/engine';
+import { FichaMkt, MarketingCRM } from './Marketing';
 
 type Act = (fn: (n: S) => string | null, ok: string) => boolean;
 const COL = { ok: '#3fb950', mid: '#d29922', bad: '#f85149' };
@@ -24,7 +25,7 @@ export function SelContacto({ s, tipo, value, onChange }: { s: S; tipo: 'CLI' | 
 }
 
 function FormContacto({ tipo, act, onDone }: { tipo: 'CLI' | 'PROV'; act: Act; onDone: () => void }) {
-  const v0 = { name: '', doc: '', tel: '', email: '', dir: '' };
+  const v0 = { name: '', doc: '', tel: '', email: '', dir: '', cumple: '' };
   const [f, setF] = useState(v0);
   const set = (k: keyof typeof f, v: string) => setF({ ...f, [k]: v });
   const et = tipo === 'CLI' ? 'cliente' : 'proveedor';
@@ -34,9 +35,10 @@ function FormContacto({ tipo, act, onDone }: { tipo: 'CLI' | 'PROV'; act: Act; o
       <label>CUIT / DNI<input value={f.doc} onChange={e => set('doc', e.target.value)} placeholder="20-12345678-9" /></label>
       <label>Teléfono<input value={f.tel} onChange={e => set('tel', e.target.value)} /></label>
       <label>Email<input value={f.email} onChange={e => set('email', e.target.value)} /></label>
-      <label>Dirección<input value={f.dir} onChange={e => set('dir', e.target.value)} /></label></div>
+      <label>Dirección<input value={f.dir} onChange={e => set('dir', e.target.value)} /></label>
+      {tipo === 'CLI' && <label>Cumpleaños (opcional)<input type="date" value={f.cumple} onChange={e => set('cumple', e.target.value)} /></label>}</div>
     <div className="pills">
-      <button className="p" onClick={() => { if (act(n => nuevoContacto(n, tipo, f.name, f.doc, f.tel, f.email, f.dir), `${et[0].toUpperCase() + et.slice(1)} «${f.name.trim()}» creado.`)) { setF(v0); onDone(); } }}>💾 Guardar {et}</button>
+      <button className="p" onClick={() => { if (act(n => nuevoContacto(n, tipo, f.name, f.doc, f.tel, f.email, f.dir, f.cumple), `${et[0].toUpperCase() + et.slice(1)} «${f.name.trim()}» creado.`)) { setF(v0); onDone(); } }}>💾 Guardar {et}</button>
       <button onClick={onDone}>Cancelar</button></div></div>);
 }
 
@@ -89,7 +91,7 @@ function CuentaCorriente({ s, c, onDone }: { s: S; c: Contacto; onDone: () => vo
 }
 
 export function Contactos({ s, act }: { s: S; act: Act }) {
-  const [vista, setVista] = useState<'CLI' | 'PROV'>('CLI');
+  const [vista, setVista] = useState<'CLI' | 'PROV' | 'MKT'>('CLI');
   const [q, setQ] = useState(''); const [fil, setFil] = useState<'all' | 'deu' | 'ok'>('all');
   const [nuevo, setNuevo] = useState(false); const [conf, setConf] = useState<number | null>(null);
   const [open, setOpen] = useState<{ id: number; modo: 'cobro' | 'cc' } | null>(null);
@@ -102,10 +104,14 @@ export function Contactos({ s, act }: { s: S; act: Act }) {
   const totalSaldo = todos.reduce((a, x) => a + x.sd, 0), deudores = todos.filter(x => x.sd > 0.005).length;
   const nVenc = (c: Contacto) => pendientesDe(s, c).filter(venc).length;
   const filtros: [typeof fil, string][] = [['all', `Todos (${todos.length})`], ['deu', `Con saldo deudor (${deudores})`], ['ok', `Al día (${todos.length - deudores})`]];
+  const pillMkt = <button className={vista === 'MKT' ? 'on' : ''} onClick={() => { setVista('MKT'); setOpen(null); setNuevo(false); }}>📣 Marketing</button>;
+  if (vista === 'MKT') return (<div className="box"><h3>👥 Clientes y Proveedores</h3>
+    <div className="pills"><button onClick={() => setVista('CLI')}>🧑 Clientes</button><button onClick={() => setVista('PROV')}>🚚 Proveedores</button>{pillMkt}</div>
+    <MarketingCRM s={s} act={act} /></div>);
   return (<div className="box"><h3>👥 Clientes y Proveedores</h3>
     <div className="pills">
       <button className={cli ? 'on' : ''} onClick={() => { setVista('CLI'); setOpen(null); setNuevo(false); }}>🧑 Clientes ({s.contactos.filter(c => c.tipo === 'CLI').length})</button>
-      <button className={!cli ? 'on' : ''} onClick={() => { setVista('PROV'); setOpen(null); setNuevo(false); }}>🚚 Proveedores ({s.contactos.filter(c => c.tipo === 'PROV').length})</button></div>
+      <button className={!cli ? 'on' : ''} onClick={() => { setVista('PROV'); setOpen(null); setNuevo(false); }}>🚚 Proveedores ({s.contactos.filter(c => c.tipo === 'PROV').length})</button>{pillMkt}</div>
     <div className="kpis">
       <div className="kpi"><small>{cli ? 'Total que nos deben' : 'Total que debemos'}</small><strong className={totalSaldo > 0.005 ? 'neg' : 'pos'}>{money(totalSaldo)}</strong></div>
       <div className="kpi"><small>{cli ? 'Clientes con deuda' : 'Proveedores con deuda'}</small><strong>{deudores}</strong></div></div>
@@ -118,6 +124,7 @@ export function Contactos({ s, act }: { s: S; act: Act }) {
       <div className="box" key={c.id} style={{ marginTop: 10, borderLeft: `4px solid ${deu ? COL.bad : COL.ok}` }}>
         <div className="row"><h3>{c.name}</h3><strong style={{ fontSize: 24, color: deu ? COL.bad : COL.ok }}>{money(sd)}</strong></div>
         <p className="mut">🪪 {c.doc || 's/d'} · 📞 {c.tel || 's/d'}{c.email ? ` · ✉️ ${c.email}` : ''}{c.dir ? ` · 📍 ${c.dir}` : ''}</p>
+        {cli && <FichaMkt s={s} c={c} />}
         <p style={{ color: deu ? COL.bad : COL.ok }}><b>{deu ? `🔴 ${cli ? 'Nos debe' : 'Le debemos'}${nv ? ` · ${nv} vencida(s) ⚠️` : ''}` : '🟢 Al día'}</b></p>
         <div className="pills">
           <button className="p" disabled={!deu} onClick={() => setOpen(open?.id === c.id && open.modo === 'cobro' ? null : { id: c.id, modo: 'cobro' })}>{cli ? '💰 Cobrar' : '🏦 Pagar'}</button>
@@ -142,7 +149,8 @@ export function imprimirTicket(s: S, t: Tx, cae = '', caeVto = '') {
     ? t.split.map(p => `<div class="f"><span>${esc(p.medio)}</span><span>${money(p.monto)}</span></div>`).join('')
     : `<div class="f"><span>${esc(t.medio)}</span><span>${money(t.amount)}</span></div>`;
   const sd = t.status === 'PENDING' ? saldo(s, t) : 0;
-  const filas = t.items.map(i => `<tr><td>${i.qty} x</td><td>${esc(i.name)}<br><small>${money(i.price)} c/u</small></td><td class="r">${money(i.qty * i.price)}</td></tr>`).join('');
+  const dOtros = r2(t.disc - (t.hh ?? 0) - (t.ptsDesc ?? 0)); // descuento manual (el resto de t.disc es Happy Hour y puntos)
+  const filas = t.items.map(i => `<tr><td>${i.qty} x</td><td>${esc(i.name)}<br><small>${money(i.price)} c/u${i.hh ? ` · Happy Hour -${i.hh}%` : ''}</small></td><td class="r">${money(i.qty * i.price)}</td></tr>`).join('');
   const html = `<!doctype html><html><head><meta charset="utf-8"><title>Ticket #${t.id}</title><style>
 @page{size:80mm auto;margin:3mm}*{box-sizing:border-box}
 body{font:12px/1.35 'Courier New',monospace;width:74mm;margin:0 auto;color:#000}
@@ -155,13 +163,16 @@ hr{border:0;border-top:1px dashed #000;margin:6px 0}.t{font-size:15px;font-weigh
 <div>Cliente: ${cli ? esc(cli.name) + (cli.doc ? ` (${esc(cli.doc)})` : '') : 'Consumidor final'}</div><div>Canal: ${canal}</div>
 <hr><table>${filas}</table><hr>
 <div class="f"><span>Subtotal</span><span>${money(bruto)}</span></div>
-${t.disc ? `<div class="f"><span>Descuento</span><span>-${money(t.disc)}</span></div>` : ''}
+${t.hh ? `<div class="f"><span>Happy Hour</span><span>-${money(t.hh)}</span></div>` : ''}
+${t.ptsDesc ? `<div class="f"><span>Canje de puntos (${t.ptsUsa})</span><span>-${money(t.ptsDesc)}</span></div>` : ''}
+${dOtros > 0 ? `<div class="f"><span>Descuento</span><span>-${money(dOtros)}</span></div>` : ''}
 ${t.rec ? `<div class="f"><span>Recargo medio de pago</span><span>${money(t.rec)}</span></div>` : ''}
 ${t.iva ? `<div class="f"><span>IVA incluido</span><span>${money(t.iva)}</span></div>` : ''}
 <div class="f t"><span>TOTAL</span><span>${money(t.amount)}</span></div>
 <hr><div>Medio de pago:</div>${pagos}
 ${sd > 0 ? `<div class="f"><b>Saldo pendiente (cta. cte.)</b><b>${money(sd)}</b></div>` : ''}
 <hr>${cae ? `<div class="c">CAE: ${esc(cae)}${caeVto ? `<br>Vto. CAE: ${esc(caeVto)}` : ''}</div>` : '<div class="c">Comprobante no válido como factura</div>'}
+${t.ptsGan && cli ? `<div class="c">Sumaste ${t.ptsGan} puntos · Saldo: ${puntosDe(s, cli.id)}</div>` : ''}
 <div class="c">¡Gracias por su compra!</div></body></html>`;
   const fr = document.createElement('iframe');
   fr.style.cssText = 'position:fixed;right:0;bottom:0;width:0;height:0;border:0';
