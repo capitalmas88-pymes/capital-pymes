@@ -1,8 +1,9 @@
 'use client';
 import { ReactNode, useEffect, useRef, useState } from 'react';
-import { CUOTAS, Cfg, GLn, Insumo, Ln, Medio, Pago, Prod, REDONDEOS, RLn, S, Sel, St, Tx, abierta, anular, calcInverso, calcIva, calcPrecio, cambiarCostoInsumo, compra, costoReceta, eliminarReceta, fabricar, flows, gasto, impactoCosto, ivaRes, liquidar, money, nuevaReceta, nuevoInsumo, nuevoProd, por, pyl, recargoMedio, recargoPasarela, recargoPlataforma, enTransito, liberarAhora, neto, transito, saldo, saldos, seed, selDefault, stk, venta, medioTipo, vincular } from '../lib/engine';
+import { CUOTAS, Cfg, GLn, Insumo, Ln, Medio, Pago, Prod, REDONDEOS, RLn, S, Sel, St, Tx, abierta, anular, calcInverso, calcIva, calcPrecio, cambiarCostoInsumo, compra, costoReceta, eliminarReceta, fabricar, flows, gasto, impactoCosto, ivaRes, liquidar, money, nuevaReceta, nuevoInsumo, nuevoProd, por, pyl, recargoMedio, recargoPasarela, recargoPlataforma, enTransito, liberarAhora, neto, transito, saldo, saldos, seed, selDefault, stk, venta, medioTipo, vincular, descuentos, hhPct } from '../lib/engine';
 import { Apertura, Cierre, Combos, EstadoCaja, Movs } from './Extras';
 import { Contactos, PuntoEquilibrio, SelContacto, UltimaVenta, imprimirTicket } from './Extras2';
+import { CanjePuntos, ConfigMkt, Sugerencias } from './Marketing';
 
 const MESES = ['Ene', 'Feb', 'Mar', 'Abr', 'May', 'Jun', 'Jul', 'Ago', 'Sep', 'Oct', 'Nov', 'Dic'];
 const CATS = ['Alquiler', 'Sueldos', 'Servicios', 'Impuestos', 'Marketing', 'Mantenimiento', 'Otros'];
@@ -107,6 +108,7 @@ function Venta({ s, act }: { s: S; act: Act }) {
   const [mixto, setMixto] = useState(false); const [parts, setParts] = useState<Pago[]>([]);
   const [cobrando, setCobrando] = useState(false);
   const [cid, setCid] = useState(0); const [ult, setUlt] = useState(0);
+  const [canje, setCanje] = useState(0); // puntos que el cliente quiere canjear
   const busq = useRef<HTMLInputElement>(null);
   const pg = usePagoVenta(s, () => { setMixto(false); setParts([]); setCobrando(false); }); const iv = useIva();
   const reales = s.medios.filter(m => m.tipo !== 'credito').map(m => m.name);
@@ -118,7 +120,10 @@ function Venta({ s, act }: { s: S; act: Act }) {
     const nc = { ...cart }; if (c <= 0) delete nc[id]; else nc[id] = c; setCart(nc);
   };
   const bruto = Object.entries(cart).reduce((a, [id, n]) => a + n * (s.prods.find(p => p.id === +id)?.price ?? 0), 0);
-  const disc = Math.round(bruto * Math.min(Math.max(pct, 0), 100)) / 100;
+  // Descuentos en orden: Happy Hour (automático) → % manual → canje de puntos
+  const dd0 = descuentos(s, cart, pct, 0, cid), canjeEf = Math.min(canje, dd0.maxPts); // el canje se ajusta solo si cambia el ticket o el cliente
+  const dd = descuentos(s, cart, pct, canjeEf, cid);
+  const disc = r2(dd.hh + dd.man + dd.pts);
   const { total, iva: ivaM } = calcIva(bruto - disc, iv.pct, iv.inc);
   const mx = mixto && !pg.canal; // el pago mixto solo existe en el local físico
   const pp = !mx && pg.canal ? recargoPlataforma(s, pg.canal, total) : null;
@@ -148,11 +153,11 @@ function Venta({ s, act }: { s: S; act: Act }) {
     const nid = s.seq + 1; // id que tendrá la venta
     const ok = act(n => {
       if (!mx && !pg.canal && !pg.pas && medioTipo(n, pg.medio) === 'credito' && !cli) return 'Para vender a cuenta corriente (fiado) elegí el cliente.';
-      const e = venta(n, cart, pg.medio, pg.estado, pg.vence, nota.trim() || cli?.name || '', pct, undefined, iv.pct, iv.inc, mx ? parts : undefined, mx ? 0 : pg.pas, pg.cuotas, mx ? 0 : pg.canal);
+      const e = venta(n, cart, pg.medio, pg.estado, pg.vence, nota.trim() || cli?.name || '', pct, undefined, iv.pct, iv.inc, mx ? parts : undefined, mx ? 0 : pg.pas, pg.cuotas, mx ? 0 : pg.canal, cli?.id ?? 0, canjeEf);
       if (!e && cli) vincular(n, cli.id);
       return e;
     }, `Venta registrada por ${money(total + rec)}.`);
-    if (ok) { setUlt(nid); setCart({}); setNota(''); setPct(0); setMixto(false); setParts([]); setCid(0); }
+    if (ok) { setUlt(nid); setCart({}); setNota(''); setPct(0); setMixto(false); setParts([]); setCid(0); setCanje(0); }
     setCobrando(false);
   };
 
@@ -173,23 +178,26 @@ function Venta({ s, act }: { s: S; act: Act }) {
         <input ref={busq} value={q} onChange={e => setQ(e.target.value)} placeholder="Escribí un nombre"
           onKeyDown={e => { if (e.key === 'Enter' && !cobrando && lista.length === 1) { add(lista[0].id, 1); setQ(''); } }} /></label>
       <div className="pills">{lista.map(p => {
-        const st = stk(s, p), bajo = st < p.min, bl = bloquea(p);
+        const st = stk(s, p), bajo = st < p.min, bl = bloquea(p), hp = hhPct(s, p.id);
         return (<button key={p.id} disabled={st <= (cart[p.id] || 0) || bl} onClick={() => add(p.id, 1)}
           title={st === 0 ? 'Sin stock' : bajo ? `Stock bajo el mínimo (${p.min})` : ''}
           style={bajo ? { borderColor: st === 0 ? COL.bad : COL.mid } : undefined}>
-          {p.combo ? '🎁 ' : ''}{bajo ? '⚠️ ' : ''}{p.name} · {money(p.price)}
+          {p.combo ? '🎁 ' : ''}{bajo ? '⚠️ ' : ''}{p.name} · {money(p.price)}{hp > 0 ? ` · 🕕 −${hp}%` : ''}
           {st === 0 ? ' · SIN STOCK' : bl ? ' · bloqueado' : bajo ? ` · quedan ${st}` : ''}</button>);
       })}</div>
-      <p className="mut">⚠️ = bajo el stock mínimo{s.cfg.bloqueaMin ? ' (la configuración bloquea su venta)' : ' (se puede vender, pero con aviso)'}.</p>
+      <p className="mut">⚠️ = bajo el stock mínimo{s.cfg.bloqueaMin ? ' (la configuración bloquea su venta)' : ' (se puede vender, pero con aviso)'}. 🕕 = Happy Hour activo.</p>
     </div>
     <div>
       {ult > 0 && <UltimaVenta s={s} id={ult} onClose={() => setUlt(0)} />}
       <h3>Ticket actual</h3>
       {!hayItems && <p className="mut">Tocá un producto para agregarlo.</p>}
-      {Object.entries(cart).map(([id, n]) => { const p = s.prods.find(x => x.id === +id)!; const bajo = stk(s, p) < p.min; return (
-        <div className="row" key={id}><span><b>{n}×</b> {p.name}{bajo && <span style={{ color: COL.mid }}> ⚠️ stock crítico</span>}</span>
+      {Object.entries(cart).map(([id, n]) => { const p = s.prods.find(x => x.id === +id)!; const bajo = stk(s, p) < p.min; const hp = hhPct(s, p.id); return (
+        <div className="row" key={id}><span><b>{n}×</b> {p.name}{hp > 0 && <span style={{ color: COL.ok }}> 🕕 −{hp}%</span>}{bajo && <span style={{ color: COL.mid }}> ⚠️ stock crítico</span>}</span>
           <span>{money(n * p.price)} <button onClick={() => add(+id, -1)}>−</button> <button onClick={() => add(+id, 1)}>+</button></span></div>); })}
       {!!bajosEnTicket.length && <div style={warnSt}>⚠️ Ojo: {bajosEnTicket.map(p => `${p.name} (hay ${stk(s, p)}, mínimo ${p.min})`).join(' · ')}. Reponé stock pronto.</div>}
+      <Sugerencias s={s} cart={cart} cid={cid} onAdd={id => add(id, 1)} />
+      {dd.hh > 0 && <div className="row"><span className="mut">🕕 Happy Hour (automático)</span><span>−{money(dd.hh)}</span></div>}
+      {dd.pts > 0 && <div className="row"><span className="mut">⭐ Canje de {canjeEf} puntos</span><span>−{money(dd.pts)}</span></div>}
       {ivaM > 0 && <div className="row"><span className="mut">IVA incluido en el total</span><span>{money(ivaM)}</span></div>}
       {rec > 0 && <div className="row"><span className="mut">{pp ? `Recargo ${s.cfg.plataformas[pg.canal - 1]?.name} ${pp.pct}% (lo paga el cliente)` : pi ? `Recargo ${s.cfg.pasarelas[pg.pas - 1]?.name}${pg.cuotas > 1 ? ` en ${pg.cuotas} cuotas` : ''} (lo paga el cliente)` : 'Recargo por medio de pago (lo paga el cliente)'}</span><span>{money(rec)}</span></div>}
       {cx && cx.abs > 0 && <div style={warnSt}>ℹ️ {pp ? `La plataforma retiene ${money(cx.abs)} (${pp.pct}%): se acredita en Banco el neto y la diferencia se registra como gasto «Comisión por Plataforma».` : `La comisión de ${money(cx.abs)} la absorbe el comercio (no se traslada al cliente) y reduce tu margen.`}</div>}
@@ -202,6 +210,7 @@ function Venta({ s, act }: { s: S; act: Act }) {
         <label>Cliente / nota<input value={nota} onChange={e => setNota(e.target.value)} /></label>
         <SelContacto s={s} tipo="CLI" value={cid} onChange={id => setCid(id)} />
         <label>Descuento %<input type="number" min={0} max={100} value={pct} onChange={e => setPct(+e.target.value)} /></label></div>
+      <CanjePuntos s={s} cid={cid} canje={canjeEf} setCanje={setCanje} maxPts={dd0.maxPts} total={total} />
 
       {!pg.canal && <label style={{ ...chkSt, margin: '8px 0' }}><input type="checkbox" style={{ width: 'auto' }} checked={mixto} onChange={e => activarMixto(e.target.checked)} />💳 Pago mixto (combinar medios)</label>}
       {mx && (<div className="box" style={{ marginBottom: 8 }}>
@@ -520,7 +529,7 @@ function ModD({ s }: { s: S }) {
   return (<div className="box"><h3>Estado de resultados · {y}</h3>
     <Tabla title="Concepto" rows={[['Ventas', col('v')], ['(−) Descuentos', col('d').map(x => -x)], ['Ventas netas', col('vn'), true],
       ['(−) Costo de ventas', col('c').map(x => -x)], ['Utilidad bruta', col('bruta'), true], ['(−) Gastos', col('g').map(x => -x)], ['(−) Comisión por Plataforma / pasarela', col('gc').map(x => -x)], ['Utilidad neta', col('neta'), true]]} />
-    <p className="mut">Criterio devengado: cuenta el día que se registra, aunque se cobre o pague después. La «Comisión por Plataforma / pasarela» es lo que retienen MercadoLibre, Tienda Nube, etc. cuando no la trasladás al cliente.</p>
+    <p className="mut">Criterio devengado: cuenta el día que se registra, aunque se cobre o pague después. La «Comisión por Plataforma / pasarela» es lo que retienen MercadoLibre, Tienda Nube, etc. cuando no la trasladás al cliente. «Descuentos» incluye el % manual, el Happy Hour y los puntos canjeados.</p>
     <Grafico title="📈 Ventas netas vs. costo vs. gastos" labels={MESES} series={[
       { name: 'Ventas netas', color: '#3fb950', v: col('vn') }, { name: 'Costo de ventas', color: '#d29922', v: col('c') },
       { name: 'Gastos', color: '#f85149', v: er.map(e => e.g + e.gc) }, { name: 'Utilidad neta', color: '#58a6ff', v: col('neta'), line: true }]} />
@@ -674,6 +683,7 @@ function Config({ s, act, upd }: { s: S; act: Act; upd: (fn: (n: S) => void) => 
         <div style={{ alignSelf: 'end' }}><button onClick={() => edL(d => { d.plataformas.splice(i, 1); })}>✕</button></div></div>)}
       <div className="pills"><button onClick={() => edL(d => { d.plataformas.push({ name: nuevoNombre(d.plataformas, 'Nueva plataforma'), pct: 0, dias: 0 }); })}>➕ Agregar plataforma</button></div>
       <p className="mut">Alta, baja, nombre, % y días se reflejan al instante en «Canal de venta» de la Registradora. Los días (ej. 2, 10, 14) son el plazo estimado en que la plataforma libera el dinero; con 0 se acredita al instante. Con «Trasladar comisiones» activo la comisión se suma al ticket; apagado, se acredita el neto y la comisión va a gastos.</p>
+      <ConfigMkt c={c} ed={ed} prods={s.prods} />
       <h3>Recargos por cuotas (%)</h3>
       <div className="scroll"><table><thead><tr><th>Cuotas</th>{c.pasarelas.map((x, i) => <th key={i}>{x.name || '(sin nombre)'}</th>)}</tr></thead><tbody>
         {CUOTAS.map(n => <tr key={n}><td>{n} cuotas</td>{c.cuotas[n].map((v, i) => <td key={i}><input type="number" style={{ width: 80 }} value={v} onChange={e => ed(d => d.cuotas[n][i] = +e.target.value)} /></td>)}</tr>)}</tbody></table></div>
@@ -684,6 +694,8 @@ function Config({ s, act, upd }: { s: S; act: Act; upd: (fn: (n: S) => void) => 
         if ([...c.pasarelas, ...c.plataformas].some(x => !Number.isFinite(x.pct) || x.pct < 0 || x.pct > 95)) return 'Las comisiones de pasarelas y plataformas deben estar entre 0 y 95%.';
         if (c.plataformas.some(x => !Number.isFinite(x.dias ?? 0) || (x.dias ?? 0) < 0)) return 'Los días de liberación no pueden ser negativos.';
         if (c.mgBajo > c.mgOk) return 'El margen «en riesgo» no puede superar al «saludable».';
+        if (c.fid.activo && (!(c.fid.pesos > 0) || !(c.fid.valor > 0))) return 'La regla de puntos necesita montos mayores a 0.';
+        if (c.happy.some(r => !(r.pct > 0 && r.pct <= 90) || !r.dias.length || !r.desde || !r.hasta)) return 'Cada regla de Happy Hour necesita % entre 1 y 90, días y horario.';
         n.cfg = c; n.medios = medios; return null; }, 'Configuración guardada.')}>Guardar configuración</button>
         <button onClick={() => act(n => { for (const q of n.prods) if (q.cost > 0) { const r = calcPrecio(q.cost, n.cfg.mv, n.cfg, selDefault); if (r) q.price = r.lista; } return null; }, 'Precios recalculados con el margen de venta, Ing. Brutos y retenciones.')}>Recalcular todos los productos</button></div>
       <p className="mut">«Recalcular» usa el margen de venta guardado, Ing. Brutos y retenciones. Guardá la configuración primero.</p></div></div>);
