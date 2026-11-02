@@ -2,6 +2,7 @@
 // Guardar como app/Marketing.tsx (al lado de page.tsx, Extras.tsx y Extras2.tsx)
 import { useState } from 'react';
 import { Aviso, Cfg, Contacto, PLANTILLA_REACT, Prod, S, avisos, descuentos, diasSinComprar, inactivos, marcarEnviado, mensaje, money, proxCumple, puntosDe, puntosGanados, sugerencias } from '../lib/engine';
+import { RedactorReactivacion } from './IA';
 
 type Act = (fn: (n: S) => string | null, ok: string) => boolean;
 const COL = { ok: '#3fb950', mid: '#d29922', bad: '#f85149', azul: '#58a6ff' };
@@ -101,6 +102,7 @@ function Reactivacion({ s, act }: { s: S; act: Act }) {
       <label>Oferta de relanzamiento %<input type="number" min={0} max={90} value={oferta} onChange={e => setOferta(+e.target.value)} /></label>
       <label>Mensaje ({'{nombre} {dias} {oferta} {negocio}'})<input value={plantilla} onChange={e => setPl(e.target.value)} /></label></div>
     <p className="mut">La oferta se concreta en la Registradora con el campo «Descuento %» al momento de la compra.</p>
+    <RedactorReactivacion s={s} oferta={oferta} onPick={setPl} />
     {!l.length ? <p className="mut">No hay clientes con {dias}+ días sin comprar. 🎉</p> : (<>
       <div className="pills">
         <button onClick={() => setSel(todos ? [] : l.map(x => x.c.id))}>{todos ? 'Quitar selección' : '☑ Seleccionar todos'}</button>
