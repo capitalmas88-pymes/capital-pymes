@@ -1,7 +1,8 @@
+import type { Seo } from './ia';
 export type Tipo = 'SALE' | 'PURCHASE' | 'EXPENSE' | 'COLLECTION' | 'PAYMENT';
 export type St = 'PAID' | 'PENDING';
 export type Prod = { id: number; name: string; stock: number; min: number; cost: number; price: number;
-  combo?: { pid: number; qty: number }[]; notes?: string };
+  combo?: { pid: number; qty: number }[]; notes?: string; desc?: string; seo?: Seo };
 export type Medio = { name: string; tipo: 'caja' | 'banco' | 'credito'; com?: number }; // com = comisión % del medio
 export type Item = { pid: number; name: string; qty: number; price: number; cost: number; ins?: boolean; hh?: number }; // hh = % de Happy Hour aplicado a la línea
 export type Pago = { medio: string; monto: number };
@@ -766,4 +767,12 @@ export function marcarEnviado(s: S, items: { cid: number; tipo: Envio['tipo']; r
   if (!items.length) return 'No hay clientes seleccionados.';
   items.forEach(x => s.envios.push({ id: s.envios.length + 1, ...x, at: now() }));
   return null;
+}
+
+/* ───────── Contenido comercial y SEO (IA) ───────── */
+export function guardarContenido(s: S, pid: number, desc: string, seo: Seo): string | null {
+  const p = s.prods.find(x => x.id === pid);
+  if (!p) return 'El producto ya no existe.';
+  if (seo.titulo.length > 60 || seo.descripcion.length > 155) return 'El título SEO admite 60 caracteres y la descripción 155.';
+  p.desc = desc || undefined; p.seo = seo.titulo ? seo : undefined; return null;
 }
