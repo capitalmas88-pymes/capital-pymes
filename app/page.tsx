@@ -4,6 +4,7 @@ import { CUOTAS, Cfg, GLn, Insumo, Ln, Medio, Pago, Prod, REDONDEOS, RLn, S, Sel
 import { Apertura, Cierre, Combos, EstadoCaja, Movs } from './Extras';
 import { Contactos, PuntoEquilibrio, SelContacto, UltimaVenta, imprimirTicket } from './Extras2';
 import { CanjePuntos, ConfigMkt, Sugerencias } from './Marketing';
+import { CatalogoIA, ChatIA } from './IA';
 
 const MESES = ['Ene', 'Feb', 'Mar', 'Abr', 'May', 'Jun', 'Jul', 'Ago', 'Sep', 'Oct', 'Nov', 'Dic'];
 const CATS = ['Alquiler', 'Sueldos', 'Servicios', 'Impuestos', 'Marketing', 'Mantenimiento', 'Otros'];
@@ -439,6 +440,7 @@ function ModB({ s, act }: { s: S; act: Act }) {
   </div></div>
     <Insumos s={s} act={act} />
     <Combos s={s} act={act} />
+    <CatalogoIA s={s} act={act} />
     <Calc s={s} act={act} /></>);
 }
 
@@ -816,5 +818,6 @@ export default function Page() {
     <div className="nav">{(Object.keys(SECC) as (keyof typeof SECC)[]).map(k => <button key={k} className={tab === k ? 'on' : ''} onClick={() => setTab(k)}>{SECC[k]}</button>)}</div>
     {tab === 'A' && <ModA s={s} act={act} />}{tab === 'B' && <ModB s={s} act={act} />}{tab === 'F' && <Recetas s={s} act={act} />}{tab === 'C' && <ModC s={s} act={act} />}{tab === 'D' && <ModD s={s} />}{tab === 'E' && <Config s={s} act={act} upd={upd} />}
     {tab === 'G' && <Contactos s={s} act={act} />}{tab === 'H' && <PuntoEquilibrio s={s} />}
+    <ChatIA s={s} />
     {msg && <div className={'toast ' + (msg.k === 'err' ? 'err' : '')}>{msg.t}</div>}</div>);
 }
