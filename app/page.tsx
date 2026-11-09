@@ -714,30 +714,80 @@ function Recetas({ s, act }: { s: S; act: Act }) {
     {v === 'nueva' && <NuevaReceta s={s} act={act} />}{v === 'fab' && <Fabricar s={s} act={act} />}{v === 'rec' && <Recetario s={s} act={act} />}</div>);
 }
 
+// Línea de receta: puede apuntar a un insumo existente o a uno NUEVO (id temporal negativo) que se crea al guardar la receta
+type RLnX = RLn & { nuevo?: { name: string; unit: string; cost: number } };
+
 function NuevaReceta({ s, act }: { s: S; act: Act }) {
   const [name, setName] = useState(''); const [lote, setLote] = useState(12); const [unidad, setUnidad] = useState('Unidad');
-  const [ins, setIns] = useState<RLn[]>([]); const [iid0, setIid] = useState(0); const [cant, setCant] = useState(0); const [mIns, setMIns] = useState('');
+  const [ins, setIns] = useState<RLnX[]>([]); const [iid0, setIid] = useState(0); const [cant, setCant] = useState(0); const [mIns, setMIns] = useState('');
+  const [modoNuevo, setModoNuevo] = useState(false);
+  const [nn, setNn] = useState(''); const [nu, setNu] = useState('kg'); const [nc, setNc] = useState(0);
+  const tmp = useRef(0); // ids temporales negativos para insumos que todavía no existen
   const iid = s.insumos.some(i => i.id === iid0) ? iid0 : s.insumos[0]?.id ?? 0;
   const [mo, setMo] = useState(0); const [cfMes, setCfMes] = useState(0); const [hMes, setHMes] = useState(200); const [hLote, setHLote] = useState(1);
   const [merma, setMerma] = useState(0);
   const cf = hMes > 0 ? cfMes / hMes * hLote : 0;
-  const c = costoReceta(s, { ins, mo, cf, merma, lote });
-  const reset = () => { setName(''); setIns([]); setCant(0); setMIns(''); setMo(0); setCfMes(0); setMerma(0); };
+  const nuevoM = modoNuevo || !s.insumos.length;
+
+  // Para el resumen de costos, los insumos nuevos se suman a un estado "virtual"
+  const sv: S = { ...s, insumos: [...s.insumos, ...ins.filter(l => l.nuevo).map(l => ({ id: l.iid, name: l.nuevo!.name, unit: l.nuevo!.unit, stock: 0, min: 0, cost: l.nuevo!.cost }))] };
+  const c = costoReceta(sv, { ins, mo, cf, merma, lote });
+
+  const nombreNuevo = nn.trim().toLowerCase();
+  const existente = s.insumos.find(i => i.name.trim().toLowerCase() === nombreNuevo);
+  const yaEnReceta = nuevoM
+    ? ins.some(l => (l.nuevo ? l.nuevo.name.trim().toLowerCase() === nombreNuevo : l.iid === existente?.id))
+    : ins.some(l => l.iid === iid);
+
+  const agregar = () => {
+    const merm = mIns === '' ? undefined : +mIns;
+    if (nuevoM) {
+      if (existente) setIns([...ins, { iid: existente.id, qty: cant, merma: merm }]); // ya existe: lo usa, no lo duplica
+      else { tmp.current -= 1; setIns([...ins, { iid: tmp.current, qty: cant, merma: merm, nuevo: { name: nn.trim(), unit: nu.trim() || 'u', cost: nc } }]); }
+      setNn(''); setNc(0);
+    } else setIns([...ins, { iid, qty: cant, merma: merm }]);
+    setCant(0); setMIns('');
+  };
+
+  const reset = () => { setName(''); setIns([]); setCant(0); setMIns(''); setMo(0); setCfMes(0); setMerma(0); setNn(''); setNc(0); setModoNuevo(false); };
+
+  const guardar = () => {
+    if (act(n => {
+      // 1) crea los insumos nuevos en el inventario, 2) arma la receta con los ids reales
+      const map = new Map<number, number>();
+      for (const l of ins) if (l.nuevo) {
+        const e = nuevoInsumo(n, l.nuevo.name, l.nuevo.unit, l.nuevo.cost, 0, 0);
+        if (e) return e;
+        const key = l.nuevo.name.trim().toLowerCase();
+        map.set(l.iid, n.insumos.filter(i => i.name.trim().toLowerCase() === key).reduce((a, i) => Math.max(a, i.id), 0));
+      }
+      const real: RLn[] = ins.map(l => ({ iid: map.get(l.iid) ?? l.iid, qty: l.qty, merma: l.merma }));
+      return nuevaReceta(n, name, lote, unidad, real, mo, cf, merma);
+    }, `Receta «${name.trim()}» guardada y producto creado en stock.`)) reset();
+  };
+
   return (<div className="grid"><div>
     <div className="form">
       <label>Nombre de la receta *<input value={name} onChange={e => setName(e.target.value)} placeholder="Ej: Medialunas de manteca" /></label>
       <label>Cantidad por lote (rinde)<input type="number" min={1} value={lote} onChange={e => setLote(+e.target.value)} /></label>
       <label>Unidad de venta<input value={unidad} onChange={e => setUnidad(e.target.value)} /></label></div>
     <h3>Insumos utilizados</h3>
-    {!s.insumos.length && <p className="mut">Creá insumos primero en Inventario y costos.</p>}
+    {!!s.insumos.length && <div className="pills"><button onClick={() => setModoNuevo(!modoNuevo)}>{nuevoM ? '📋 Elegir uno existente' : '✨ Insumo nuevo (no está en el inventario)'}</button></div>}
     <div className="form">
-      <label>Insumo<select value={iid} onChange={e => setIid(+e.target.value)}>{s.insumos.map(i => <option key={i.id} value={i.id}>{i.name} ({i.unit})</option>)}</select></label>
+      {nuevoM ? (<>
+        <label>Nombre del insumo<input value={nn} onChange={e => setNn(e.target.value)} placeholder="Ej: Harina 000" /></label>
+        <label>Unidad<input value={nu} onChange={e => setNu(e.target.value)} placeholder="kg, lt, u…" /></label>
+        <label>Costo por unidad $<input type="number" min={0} step="any" value={nc} onChange={e => setNc(+e.target.value)} /></label>
+      </>) : (
+        <label>Insumo<select value={iid} onChange={e => setIid(+e.target.value)}>{s.insumos.map(i => <option key={i.id} value={i.id}>{i.name} ({i.unit})</option>)}</select></label>)}
       <label>Cantidad por lote<input type="number" min={0} step="any" value={cant} onChange={e => setCant(+e.target.value)} /></label>
       <label>Merma % de este insumo<input type="number" min={0} step="any" value={mIns} placeholder={`Vacío = general (${merma}%)`} onChange={e => setMIns(e.target.value)} /></label>
-      <div style={{ alignSelf: 'end' }}><button disabled={!iid || cant <= 0 || ins.some(l => l.iid === iid)} onClick={() => { setIns([...ins, { iid, qty: cant, merma: mIns === '' ? undefined : +mIns }]); setCant(0); setMIns(''); }}>➕ Agregar insumo</button></div></div>
-    {ins.map((l, i) => { const x = s.insumos.find(q => q.id === l.iid); return (<div className="row" key={l.iid}>
-      <span><b>{l.qty} {x?.unit}</b> {x?.name} <span className="mut">· merma {l.merma ?? merma}%{l.merma == null ? ' (general)' : ''}</span></span>
-      <span>{money(l.qty * (x?.cost ?? 0))} <button onClick={() => setIns(ins.filter((_, k) => k !== i))}>✕</button></span></div>); })}
+      <div style={{ alignSelf: 'end' }}><button disabled={cant <= 0 || yaEnReceta || (nuevoM ? !nn.trim() : !iid)} onClick={agregar}>➕ Agregar insumo</button></div></div>
+    {nuevoM && existente && <p className="mut">«{existente.name}» ya existe en el inventario: se usa ese, con su costo actual ({money(existente.cost)}).</p>}
+    {ins.map((l, i) => { const x = l.nuevo ?? s.insumos.find(q => q.id === l.iid); const nm = l.nuevo ? l.nuevo.name : (x as any)?.name; const un = (x as any)?.unit; const cu = (x as any)?.cost ?? 0;
+      return (<div className="row" key={l.iid}>
+        <span><b>{l.qty} {un}</b> {nm}{l.nuevo && <span style={{ color: COL.ok }}> 🆕 se crea al guardar</span>} <span className="mut">· merma {l.merma ?? merma}%{l.merma == null ? ' (general)' : ''}</span></span>
+        <span>{money(l.qty * cu)} <button onClick={() => setIns(ins.filter((_, k) => k !== i))}>✕</button></span></div>); })}
     <h3>Mano de obra, costos fijos y merma</h3>
     <div className="form">
       <label>Mano de obra del lote $<input type="number" min={0} value={mo} onChange={e => setMo(+e.target.value)} /></label>
@@ -755,8 +805,8 @@ function NuevaReceta({ s, act }: { s: S; act: Act }) {
     <div className="row"><span className="mut">Merma (por insumo)</span><span>{money(c.merma)}</span></div>
     <div className="row"><span className="mut">Costo total del lote</span><strong>{money(c.total)}</strong></div>
     <div className="row"><span className="mut">Costo por {unidad.toLowerCase() || 'unidad'}</span><strong style={{ fontSize: 24 }}>{money(c.unit)}</strong></div>
-    <button className="p" onClick={() => { if (act(n => nuevaReceta(n, name, lote, unidad, ins, mo, cf, merma), `Receta «${name.trim()}» guardada y producto creado en stock.`)) reset(); }}>💾 Guardar receta</button>
-    <p className="mut">Crea el producto terminado (con stock 0) o lo vincula si ya existe. El stock se suma al fabricar.</p>
+    <button className="p" onClick={guardar}>💾 Guardar receta</button>
+    <p className="mut">Crea el producto terminado (con stock 0) o lo vincula si ya existe. Los insumos nuevos quedan en Inventario con stock 0: cargales stock desde Compra → Insumos. El stock se suma al fabricar.</p>
   </div></div>);
 }
 
