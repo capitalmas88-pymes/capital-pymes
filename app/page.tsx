@@ -1,10 +1,12 @@
 'use client';
-import { ReactNode, useEffect, useRef, useState } from 'react';
-import { CUOTAS, Cfg, GLn, Insumo, Ln, Medio, Pago, Prod, REDONDEOS, RLn, S, Sel, St, Tx, abierta, anular, calcInverso, calcIva, calcPrecio, cambiarCostoInsumo, compra, costoReceta, eliminarReceta, fabricar, flows, gasto, impactoCosto, ivaRes, liquidar, money, nuevaReceta, nuevoInsumo, nuevoProd, por, pyl, recargoMedio, recargoPasarela, recargoPlataforma, enTransito, liberarAhora, neto, transito, saldo, saldos, seed, selDefault, stk, venta, medioTipo, vincular, descuentos, hhPct } from '../lib/engine';
+import { ReactNode, useEffect, useMemo, useRef, useState } from 'react';
+import { CUOTAS, Cfg, GLn, Insumo, Ln, Medio, Pago, Prod, REDONDEOS, RLn, S, Sel, St, Tx, abierta, anular, calcInverso, calcIva, calcPrecio, cambiarCostoInsumo, compra, costoReceta, eliminarReceta, fabricar, flows, gasto, impactoCosto, ivaRes, liquidar, money, nuevaReceta, nuevoInsumo, nuevoProd, por, pyl, recargoMedio, recargoPasarela, recargoPlataforma, enTransito, liberarAhora, neto, transito, saldo, saldos, selDefault, stk, venta, medioTipo, vincular, descuentos, hhPct } from '../lib/engine';
 import { Apertura, Cierre, Combos, EstadoCaja, Movs } from './Extras';
 import { Contactos, PuntoEquilibrio, SelContacto, UltimaVenta, imprimirTicket } from './Extras2';
 import { CanjePuntos, ConfigMkt, Sugerencias } from './Marketing';
 import { CatalogoIA, ChatIA } from './IA';
+import { crearCliente } from '../lib/supabase/client';
+import { Cargado, cargar, guardar as guardarCambios } from '../lib/db';
 
 const MESES = ['Ene', 'Feb', 'Mar', 'Abr', 'May', 'Jun', 'Jul', 'Ago', 'Sep', 'Oct', 'Nov', 'Dic'];
 const CATS = ['Alquiler', 'Sueldos', 'Servicios', 'Impuestos', 'Marketing', 'Mantenimiento', 'Otros'];
@@ -793,22 +795,79 @@ function Recetario({ s, act }: { s: S; act: Act }) {
 }
 
 export default function Page() {
+  const sb = useMemo(() => crearCliente(), []);
   const [s, setS] = useState<S | null>(null); const [tab, setTab] = useState<keyof typeof SECC>('A'); const [msg, setMsg] = useState<Msg>(null);
-  useEffect(() => { setS(seed()); }, []);
+  const [fase, setFase] = useState<'cargando' | 'alta' | 'listo' | 'error'>('cargando');
+  const [errCarga, setErrCarga] = useState(''); const [nid, setNid] = useState(''); const [nombreNuevo, setNombreNuevo] = useState('');
+  const [sus, setSus] = useState<{ estado: string; hasta: string | null } | null>(null);
+  const base = useRef<Cargado | null>(null);   // último estado leído de la base (contra él se calculan los cambios)
+  const ocupado = useRef(false);               // true mientras se guarda: evita dos operaciones pisándose
+
+  const abrir = async (id: string) => {
+    const c = await cargar(sb, id);
+    base.current = c; setNid(id); setS(structuredClone(c.s)); setFase('listo');
+    const { data } = await sb.from('suscripciones').select('estado, trial_hasta, periodo_hasta').eq('negocio_id', id).maybeSingle();
+    if (data) setSus({ estado: data.estado, hasta: data.estado === 'trial' ? data.trial_hasta : data.periodo_hasta });
+  };
+  useEffect(() => { (async () => {
+    try {
+      const { data: { user } } = await sb.auth.getUser();
+      if (!user) { window.location.href = '/login'; return; }
+      await sb.rpc('aceptar_invitaciones');   // si lo invitaron a un negocio, lo suma
+      const { data, error } = await sb.from('membresias').select('negocio_id').eq('user_id', user.id).eq('activo', true).order('id').limit(1);
+      if (error) throw error;
+      if (!data?.length) { setFase('alta'); return; }
+      await abrir(data[0].negocio_id);
+    } catch (e: any) { setErrCarga(e?.message ?? String(e)); setFase('error'); }
+  })(); }, []);
   useEffect(() => { if (msg) { const t = setTimeout(() => setMsg(null), 3500); return () => clearTimeout(t); } }, [msg]);
+
+  const salir = async () => { await sb.auth.signOut(); window.location.href = '/login'; };
+  const crear = async () => {
+    const { data, error } = await sb.rpc('crear_negocio', { p_nombre: nombreNuevo });
+    if (error) { setMsg({ k: 'err', t: error.message }); return; }
+    try { await abrir(data as string); } catch (e: any) { setErrCarga(e?.message ?? String(e)); setFase('error'); }
+  };
+
+  if (fase === 'cargando') return <div className="wrap"><p className="mut">Cargando tu negocio…</p></div>;
+  if (fase === 'error') return <div className="wrap"><div className="box"><p className="neg">No pude cargar los datos: {errCarga}</p>
+    <div className="pills"><button className="p" onClick={() => location.reload()}>Reintentar</button><button onClick={salir}>Salir</button></div></div></div>;
+  if (fase === 'alta') return (<div className="wrap" style={{ maxWidth: 460, margin: '60px auto' }}><div className="box">
+    <h3>👋 ¡Bienvenido! Creemos tu negocio</h3>
+    <p className="mut">Vas a tener 14 días de prueba gratis. Después podés cambiar el nombre y completar los datos en Configuración.</p>
+    <div className="form"><label>Nombre del negocio<input value={nombreNuevo} onChange={e => setNombreNuevo(e.target.value)} onKeyDown={e => { if (e.key === 'Enter' && nombreNuevo.trim()) crear(); }} /></label></div>
+    <div className="pills"><button className="p" disabled={!nombreNuevo.trim()} onClick={crear}>Crear mi negocio</button><button onClick={salir}>Salir</button></div>
+    {msg && <p className="neg">{msg.t}</p>}</div></div>);
   if (!s) return null;
+
+  // Ejecuta la operación con engine.ts (valida y calcula) y guarda en Supabase lo que cambió.
+  // La pantalla se actualiza al instante; si el guardado falla, vuelve a mostrar lo real de la base.
   const act: Act = (fn, ok) => {
+    if (!base.current) return false;
+    if (ocupado.current) { setMsg({ k: 'err', t: 'Guardando la operación anterior… probá de nuevo en un instante.' }); return false; }
     const n = structuredClone(s); const e = fn(n);
     if (e) { setMsg({ k: 'err', t: e }); return false; }
-    setS(n); setMsg({ k: 'ok', t: ok }); return true;
+    setS(n); ocupado.current = true;
+    guardarCambios(sb, nid, base.current, n).then(async err => {
+      try { const c = await cargar(sb, nid); base.current = c; setS(structuredClone(c.s)); setMsg(err ? { k: 'err', t: err } : { k: 'ok', t: ok }); }
+      catch (x: any) { setMsg({ k: 'err', t: 'No pude actualizar la pantalla: ' + (x?.message ?? x) }); }
+      finally { ocupado.current = false; }
+    });
+    return true;
   };
+  // Cambios en vivo de Configuración (pasarelas / plataformas): solo en pantalla, se guardan con «Guardar configuración»
   const upd = (fn: (n: S) => void) => setS(prev => { if (!prev) return prev; const n = structuredClone(prev); fn(n); return n; });
+
   const h = new Date(), mes = pyl(s, d => d.getMonth() === h.getMonth() && d.getFullYear() === h.getFullYear());
   const { caja, banco } = saldos(s);
   const bajos = s.prods.filter(p => stk(s, p) < p.min).length + s.insumos.filter(i => i.stock < i.min).length;
+  const dias = sus?.hasta ? Math.ceil((+new Date(sus.hasta) - Date.now()) / 864e5) : null;
+  const vencida = !!sus && (!['trial', 'activa'].includes(sus.estado) || (dias != null && dias + (sus.estado === 'activa' ? 3 : 0) < 0));
   return (<div className="wrap">
     <div className="top"><div className="brand">🏢 {s.neg.nombre || <>Capital<b>+</b> PyMEs</>}</div>
-      <span><span className="mut">🧪 Modo simulación: los datos no se guardan </span><button onClick={() => { setS({ ...seed(), neg: s.neg, cfg: s.cfg }); setMsg({ k: 'ok', t: 'Datos de ejemplo reiniciados.' }); }}>Reiniciar</button></span></div>
+      <span>{sus?.estado === 'trial' && dias != null && dias >= 0 && <span className="mut">🎁 Prueba gratis: te quedan {dias} día(s) </span>}
+        <button onClick={salir}>Salir</button></span></div>
+    {vencida && <div style={warnSt}>⚠️ Tu suscripción está vencida: podés consultar tus datos, pero no registrar operaciones nuevas.</div>}
     <div className="kpis">
       <div className="kpi"><small>💵 Caja chica</small><strong>{money(caja)}</strong></div>
       <div className="kpi"><small>🏦 Bancos / Digital</small><strong>{money(banco)}</strong></div>
